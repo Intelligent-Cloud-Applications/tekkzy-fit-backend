@@ -1,0 +1,17 @@
+[
+  {
+    "IndexName": "institution-paymentDate-index",
+    "KeySchema": [
+      { "AttributeName": "institution", "KeyType": "HASH" },
+      { "AttributeName": "paymentDate", "KeyType": "RANGE" }
+    ],
+    "Projection": { "ProjectionType": "ALL" }
+  },
+  {
+    "IndexName": "paymentDate-index",
+    "KeySchema": [
+      { "AttributeName": "paymentDate", "KeyType": "HASH" }
+    ],
+    "Projection": { "ProjectionType": "ALL" }
+  }
+]

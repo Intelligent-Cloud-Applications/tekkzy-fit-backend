@@ -1,0 +1,127 @@
+service: tekkzy-fit-api
+frameworkVersion: "3"
+useDotenv: true
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'us-east-2'}
+  memorySize: 256
+  timeout: 20
+  environment:
+    STAGE: ${self:provider.stage}
+    INSTITUTION: Fitnessworld001
+    PROFILE_TABLE_NAME: ${self:custom.stage.${self:provider.stage}.profileTable}
+    PAYMENT_TABLE_NAME: ${self:custom.stage.${self:provider.stage}.paymentTable}
+    RAZORPAY_MODE: ${self:custom.stage.${self:provider.stage}.razorpayMode}
+    RAZORPAY_KEY_ID: ${self:custom.stage.${self:provider.stage}.razorpayKeyId}
+    RAZORPAY_SECRET_KEY: ${self:custom.stage.${self:provider.stage}.razorpaySecret}
+    RAZORPAY_TEST_KEY_ID: ${env:RAZORPAY_TEST_KEY_ID}
+    RAZORPAY_TEST_SECRET_KEY: ${env:RAZORPAY_TEST_SECRET_KEY}
+    RAZORPAY_WEBHOOK_SECRET: ${self:custom.stage.${self:provider.stage}.razorpayWebhook}
+    GYM_API_KEY: ${env:GYM_API_KEY}
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
+            - dynamodb:Query
+            - dynamodb:Scan
+          Resource:
+            - arn:aws:dynamodb:us-east-2:*:table/${self:custom.stage.${self:provider.stage}.profileTable}
+            - arn:aws:dynamodb:us-east-2:*:table/${self:custom.stage.${self:provider.stage}.profileTable}/index/*
+            - arn:aws:dynamodb:us-east-2:*:table/${self:custom.stage.${self:provider.stage}.paymentTable}
+            - arn:aws:dynamodb:us-east-2:*:table/${self:custom.stage.${self:provider.stage}.paymentTable}/index/*
+
+custom:
+  stage:
+    dev:
+      profileTable: beta_user_profile
+      paymentTable: beta_payment
+      razorpayMode: test
+      razorpayKeyId: ${env:RAZORPAY_TEST_KEY_ID}
+      razorpaySecret: ${env:RAZORPAY_TEST_SECRET_KEY}
+      razorpayWebhook: ${env:RAZORPAY_WEBHOOK_SECRET}
+    prod:
+      profileTable: userprofile
+      paymentTable: payments
+      razorpayMode: live
+      razorpayKeyId: ${env:RAZORPAY_LIVE_KEY_ID}
+      razorpaySecret: ${env:RAZORPAY_LIVE_SECRET_KEY}
+      razorpayWebhook: ${env:RAZORPAY_WEBHOOK_SECRET_LIVE}
+  cors:
+    origin: '*'
+    headers:
+      - Content-Type
+      - Authorization
+      - X-Gym-Key
+      - X-Institution
+      - X-Razorpay-Signature
+      - X-Amz-Date
+      - X-Api-Key
+      - X-Amz-Security-Token
+      - X-Amz-User-Agent
+    allowCredentials: false
+
+functions:
+  members:
+    handler: src/members.handler
+    events:
+      - http:
+          path: members
+          method: ANY
+          cors: ${self:custom.cors}
+      - http:
+          path: members/{id}
+          method: ANY
+          cors: ${self:custom.cors}
+
+  payments:
+    handler: src/payments.handler
+    events:
+      - http:
+          path: payments
+          method: ANY
+          cors: ${self:custom.cors}
+      - http:
+          path: payments/{id}
+          method: ANY
+          cors: ${self:custom.cors}
+
+  devices:
+    handler: src/devices.handler
+    timeout: 29
+    events:
+      - http:
+          path: devices/{proxy+}
+          method: ANY
+          cors: ${self:custom.cors}
+
+  sync:
+    handler: src/sync.handler
+    events:
+      - http:
+          path: sync/push
+          method: ANY
+          cors: ${self:custom.cors}
+      - http:
+          path: sync/pull
+          method: ANY
+          cors: ${self:custom.cors}
+
+  webhook:
+    handler: src/webhook.handler
+    events:
+      - http:
+          path: webhooks/razorpay
+          method: POST
+          cors: ${self:custom.cors}
+      - http:
+          path: webhooks/razorpay
+          method: GET
+          cors: ${self:custom.cors}

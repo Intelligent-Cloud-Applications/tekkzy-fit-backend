@@ -1,0 +1,8 @@
+{
+  "stage": "dev",
+  "region": "us-east-2",
+  "baseUrl": "https://g87iwuddyc.execute-api.us-east-2.amazonaws.com/dev",
+  "members": "https://g87iwuddyc.execute-api.us-east-2.amazonaws.com/dev/members",
+  "payments": "https://g87iwuddyc.execute-api.us-east-2.amazonaws.com/dev/payments",
+  "webhook": "https://g87iwuddyc.execute-api.us-east-2.amazonaws.com/dev/payments/webhook"
+}

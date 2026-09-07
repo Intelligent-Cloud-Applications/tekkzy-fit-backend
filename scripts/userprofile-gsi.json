@@ -1,0 +1,10 @@
+[
+  {
+    "IndexName": "emailId-cognitoId-index",
+    "KeySchema": [
+      { "AttributeName": "emailId", "KeyType": "HASH" },
+      { "AttributeName": "cognitoId", "KeyType": "RANGE" }
+    ],
+    "Projection": { "ProjectionType": "ALL" }
+  }
+]
