@@ -175,6 +175,7 @@ function toMember(item) {
     planId: item.planId || '',
     planName: item.planName || '',
     attendance: item.attendance && typeof item.attendance === 'object' ? item.attendance : {},
+    attendanceDays: item.attendanceDays && typeof item.attendanceDays === 'object' ? item.attendanceDays : {},
     amount: item.amount ?? null,
     paymentLinkUrl: paid ? '' : item.paymentLinkUrl || '',
     cognitoId: item.cognitoId,
