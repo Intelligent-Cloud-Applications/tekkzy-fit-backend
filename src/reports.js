@@ -96,6 +96,7 @@ function toRow(item) {
     totalAttendance: Number(item.totalAttendance || 0),
     totalMembers: Number(item.totalMembers || 0),
     cashPayment: Number(item.cashPayment || item.incomes?.cash || 0),
+    upiPayment: Number(item.upiPayment || item.incomes?.upi || 0),
     razorpayPayment: Number(item.razorpayPayment || item.incomes?.razorpay || 0),
     totalDiscontinued: Number(item.totalDiscontinued || 0),
     deletedAttendance: Array.isArray(item.deletedAttendance) ? item.deletedAttendance : [],
@@ -110,7 +111,7 @@ function isPaid(row) {
 
 function paidAmount(row) {
   const mode = String(row.paymentMode || row.method || '').toUpperCase();
-  if (mode === 'CASH') return Number(row.amount || row.netAmount || 0);
+  if (mode === 'CASH' || mode === 'UPI') return Number(row.amount || row.netAmount || 0);
   return Number(row.netAmount != null ? row.netAmount : row.amount || 0);
 }
 
@@ -155,6 +156,7 @@ function fromBody(institution, body, existing) {
     totalAttendance: stored,
     totalMembers: Number(body.totalMembers ?? existing?.totalMembers ?? 0),
     cashPayment: Number(body.cashPayment ?? existing?.cashPayment ?? 0),
+    upiPayment: Number(body.upiPayment ?? existing?.upiPayment ?? 0),
     razorpayPayment: Number(body.razorpayPayment ?? existing?.razorpayPayment ?? 0),
     totalDiscontinued: Number(body.totalDiscontinued ?? existing?.totalDiscontinued ?? 0),
     deletedAttendance: merged.deletedAttendance,
@@ -162,6 +164,7 @@ function fromBody(institution, body, existing) {
     incomes: {
       ...(existing?.incomes || {}),
       cash: Number(body.cashPayment ?? existing?.cashPayment ?? 0),
+      upi: Number(body.upiPayment ?? existing?.upiPayment ?? 0),
       razorpay: Number(body.razorpayPayment ?? existing?.razorpayPayment ?? 0),
     },
     updatedAt: new Date().toISOString(),
@@ -178,14 +181,18 @@ async function computeCloudSnapshot(institution, month, extras = {}) {
   const cashPayment = monthPays
     .filter((row) => String(row.paymentMode || row.method || '').toUpperCase() === 'CASH')
     .reduce((sum, row) => sum + paidAmount(row), 0);
+  const upiPayment = monthPays
+    .filter((row) => String(row.paymentMode || row.method || '').toUpperCase() === 'UPI')
+    .reduce((sum, row) => sum + paidAmount(row), 0);
   const razorpayPayment = monthPays
-    .filter((row) => String(row.paymentMode || row.method || '').toUpperCase() !== 'CASH')
+    .filter((row) => !['CASH', 'UPI'].includes(String(row.paymentMode || row.method || '').toUpperCase()))
     .reduce((sum, row) => sum + paidAmount(row), 0);
   return {
     month,
     totalAttendance: extras.totalAttendance != null ? Number(extras.totalAttendance) : undefined,
     totalMembers: members.length,
     cashPayment,
+    upiPayment,
     razorpayPayment,
     totalDiscontinued: members.filter(isDiscontinued).length,
   };

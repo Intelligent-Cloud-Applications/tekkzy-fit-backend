@@ -9,7 +9,14 @@ function newOfflineId() {
 }
 
 function isCashItem(item) {
-  return String(item.paymentMode || item.method || '').toUpperCase() === 'CASH';
+  const mode = String(item.paymentMode || item.method || '').toUpperCase();
+  return mode === 'CASH' || mode === 'UPI';
+}
+
+function publicMethod(item) {
+  const mode = String(item.paymentMode || item.method || 'RAZORPAY').toUpperCase();
+  if (mode === 'CASH' || mode === 'UPI') return mode;
+  return 'RAZORPAY';
 }
 
 function publicPaymentId(item) {
@@ -121,7 +128,7 @@ function toMember(item) {
   const name = item.name || `${firstName} ${lastName}`.trim() || item.userName || 'Member';
   const paid = String(item.paymentStatus || '').toUpperCase() === 'PAID';
   const fromRazorpay = item.renewDateSource === 'razorpay' || Boolean(item.razorpaySubscriptionId && paid);
-  const cash = String(item.paymentMethod || '').toUpperCase() === 'CASH'
+  const cash = ['CASH', 'UPI'].includes(String(item.paymentMethod || '').toUpperCase())
     || item.renewDateSource === 'manual'
     || String(item.subscriptionStatus || '').toUpperCase() === 'OFFLINE';
   const storedRenew = item.renewDate || item.rePaymentDate || '';
@@ -160,7 +167,7 @@ function toMember(item) {
     renewDateSource: fromRazorpay ? 'razorpay' : item.renewDateSource || null,
     subscriptionId: item.razorpaySubscriptionId || '',
     paymentMethod: item.paymentMethod || '',
-    subscriptionStatus: String(item.paymentMethod || '').toUpperCase() === 'CASH'
+    subscriptionStatus: ['CASH', 'UPI'].includes(String(item.paymentMethod || '').toUpperCase())
       || (!item.razorpaySubscriptionId && !fromRazorpay && paid && !item.paymentLinkUrl)
       ? 'OFFLINE'
       : item.subscriptionStatus || '',
@@ -204,7 +211,7 @@ function toPayment(item) {
     planId: item.planId || '',
     amount: Number(
       item.netAmount != null && String(item.paymentStatus || item.status || '').toUpperCase() === 'PAID'
-        && String(item.paymentMode || item.method || '').toUpperCase() !== 'CASH'
+        && !['CASH', 'UPI'].includes(String(item.paymentMode || item.method || '').toUpperCase())
         ? item.netAmount
         : (item.amount || item.netAmount || 0),
     ),
@@ -212,7 +219,7 @@ function toPayment(item) {
     feeAmount: Number(item.feeAmount || 0),
     netAmount: Number(item.netAmount != null ? item.netAmount : (item.amount || 0)),
     date: new Date(dateNum).toISOString().slice(0, 10),
-    method: String(item.paymentMode || item.method || 'RAZORPAY').toUpperCase() === 'CASH' ? 'CASH' : 'RAZORPAY',
+    method: publicMethod(item),
     status: status === 'PAID' || status === 'CAPTURED' ? 'PAID' : status === 'FAILED' ? 'FAILED' : 'PENDING',
     invoiceNumber: item.invoiceNumber || '',
     notes: item.notes || item.paymentLinkUrl || '',

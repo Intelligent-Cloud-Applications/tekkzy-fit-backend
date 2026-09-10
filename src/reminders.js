@@ -60,7 +60,7 @@ function wantsReminderPayLink(row) {
   const method = String(row.paymentMethod || '').toUpperCase();
   if (sub === 'ACTIVE' || sub === 'PAUSED') return false;
   return sub === 'CANCELLED' || sub === 'OFFLINE' || sub === 'PENDING'
-    || method === 'CASH' || method === 'OFFLINE';
+    || method === 'CASH' || method === 'UPI' || method === 'OFFLINE';
 }
 
 function expiryMessage(row, company, end, payUrl = '') {
@@ -83,7 +83,7 @@ function expiryMessage(row, company, end, payUrl = '') {
       ? `${open} Pay now to continue: ${link} Thank you, ${brand}.`
       : `${open} Kindly complete payment in advance for a smooth continuation of your membership. Thank you, ${brand}.`;
   }
-  if (sub === 'OFFLINE' || sub === 'CASH') {
+  if (sub === 'OFFLINE' || sub === 'CASH' || sub === 'UPI') {
     return link
       ? `${open} Pay now to renew: ${link} Or renew at the reception desk. Thank you, ${brand}.`
       : `${open} Please renew at the reception desk to continue uninterrupted access. Thank you, ${brand}.`;

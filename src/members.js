@@ -150,9 +150,14 @@ async function ensureRenewalPayLink(profile) {
   return { profile: next, url: link.paymentLinkUrl, reused: false };
 }
 
+function deskMethod(body) {
+  const method = String(body.paymentMethod || body.method || '').toUpperCase();
+  return method === 'UPI' ? 'UPI' : method === 'CASH' ? 'CASH' : '';
+}
+
 function wantsOnlineLink(body) {
   const method = String(body.paymentMethod || body.method || '').toUpperCase();
-  if (method === 'CASH' || body.skipPayment) return false;
+  if (method === 'CASH' || method === 'UPI' || body.skipPayment) return false;
   if (method === 'ONLINE' || method === 'RAZORPAY' || body.sendPayLink) return true;
   return false;
 }
@@ -270,13 +275,14 @@ async function applySubscriptionAction(existing, profile, body) {
 
 async function applyPayment(profile, body) {
   if (wantsOnlineLink(body)) return sendPayLink(profile, body);
-  if (String(body.paymentMethod || body.method || '').toUpperCase() === 'CASH') return recordCash(profile, body);
+  if (deskMethod(body)) return recordCash(profile, body);
   await dynamo.putProfile(profile);
   const end = String(body.deviceEnd || body.renewDate || '').slice(0, 10);
   if (body.renewDateSource === 'manual' && /^\d{4}-\d{2}-\d{2}$/.test(end) && profile.lastPaymentId) {
     try {
       const pay = await dynamo.getPayment(profile.cognitoId, profile.lastPaymentId);
-      if (pay && String(pay.paymentMode || '').toUpperCase() === 'CASH') {
+      const mode = String(pay.paymentMode || '').toUpperCase();
+      if (pay && (mode === 'CASH' || mode === 'UPI')) {
         await dynamo.putPayment({ ...pay, renewDate: end });
       }
     } catch (_err) {
@@ -304,6 +310,7 @@ function cashEndDate(body, profile, durationDays) {
 }
 
 async function recordCash(profile, body) {
+  const mode = deskMethod(body) || 'CASH';
   const gymPlanId = body.planId || profile.planId;
   const gymPlan = gymPlanId ? await dynamo.getPlan(profile.institution, gymPlanId) : null;
   const recurring = Number(body.amount ?? gymPlan?.price ?? profile.amount ?? 0);
@@ -314,6 +321,7 @@ async function recordCash(profile, body) {
   const durationDays = Number(body.durationDays ?? profile.durationDays ?? 30);
   const paymentId = newOfflineId();
   const now = Date.now();
+  const label = mode === 'UPI' ? 'UPI' : 'cash';
   const payment = {
     cognitoId: profile.cognitoId,
     paymentId,
@@ -330,7 +338,7 @@ async function recordCash(profile, body) {
     planName: body.planName || profile.planName || '',
     durationDays,
     paymentType: 'membership',
-    paymentMode: 'CASH',
+    paymentMode: mode,
     paymentStatus: 'PAID',
     status: 'PAID',
     active: true,
@@ -342,14 +350,14 @@ async function recordCash(profile, body) {
     createdAtIso: new Date(now).toISOString(),
     source: profile.institution,
     notes: addonAmount > 0
-      ? `Paid in cash at the desk (₹${recurring} + ₹${addonAmount} admission)`
-      : 'Paid in cash at the desk',
+      ? `Paid by ${label} at the desk (₹${recurring} + ₹${addonAmount} admission)`
+      : `Paid by ${label} at the desk`,
   };
   await dynamo.putPayment(payment);
   const next = {
     ...profile,
     paymentStatus: 'PAID',
-    paymentMethod: 'CASH',
+    paymentMethod: mode,
     subscriptionStatus: 'OFFLINE',
     paymentLinkUrl: '',
     paymentLinkId: '',
