@@ -44,12 +44,11 @@ function queryString(event) {
 
 function photoResponse(payload) {
   if (!payload || !payload.__photo || !payload.base64) return null;
-  return {
-    statusCode: 200,
-    headers: { ...cors(), 'Content-Type': payload.contentType || 'image/jpeg' },
-    body: payload.base64,
-    isBase64Encoded: true,
-  };
+  const contentType = payload.contentType || 'image/jpeg';
+  const raw = String(payload.base64);
+  const image = raw.startsWith('data:') ? raw : `data:${contentType};base64,${raw}`;
+  // JSON, not raw JPEG — API Gateway corrupts binary unless binaryMediaTypes is set.
+  return json(200, { ok: true, image, contentType });
 }
 
 function reply(statusCode, payload) {
@@ -65,7 +64,7 @@ async function saveHeartbeat(institution, body) {
     hostOnThisWifi: Boolean(body.hostOnThisWifi),
     deviceOnline: Object.prototype.hasOwnProperty.call(body, 'deviceOnline')
       ? Boolean(body.deviceOnline)
-      : Boolean(body.hostOnThisWifi),
+      : false,
     scanning: Boolean(body.scanning),
   });
 }
@@ -179,13 +178,15 @@ async function relayLive(event, path, body, institution) {
   }
 
   if (verb === 'GET' && path === 'live/config') {
+    const age = Date.now() - new Date(bridge.updatedAt || 0).getTime();
+    const fresh = Number.isFinite(age) && age < 45_000;
     return json(200, {
       host: bridge.host || '',
       username: bridge.username || '',
       passwordSet: Boolean(bridge.passwordSet),
       laptopIps: Array.isArray(bridge.laptopIps) ? bridge.laptopIps : [],
       hostOnThisWifi: Boolean(bridge.hostOnThisWifi),
-      deviceOnline: Boolean(bridge.deviceOnline),
+      deviceOnline: Boolean(fresh && bridge.deviceOnline),
       scanning: Boolean(bridge.scanning),
       laptopServer: true,
     });

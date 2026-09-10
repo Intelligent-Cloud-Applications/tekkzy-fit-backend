@@ -1,6 +1,13 @@
 const dynamo = require('./dynamo');
-const { fetchSubscription, mapSubscriptionStatus, subscriptionIsPaid, subscriptionEndDate, ymdFromUnix } = require('./razorpay');
+const { fetchSubscription, fetchPayment, netFromRazorpayPayment, mapSubscriptionStatus, subscriptionIsPaid, subscriptionEndDate, ymdFromUnix } = require('./razorpay');
 const { addPlanDuration, repairCycleEnd, today, newId } = require('./map');
+
+function keepCurrentCycleEnd(existingEnd, nextEnd) {
+  const current = String(existingEnd || '').slice(0, 10);
+  const next = String(nextEnd || '').slice(0, 10);
+  if (current && current > today() && next && next > current) return current;
+  return next || current;
+}
 
 function notesFrom(payload) {
   const link = payload.payload?.payment_link?.entity || {};
@@ -25,6 +32,9 @@ function idsFromPayload(payload) {
     cognitoId: notes.cognitoId || notes.memberId,
     paymentId: notes.paymentId,
     razorpayPaymentId: paymentEntity.id || invoice.payment_id,
+    chargedPaise: paymentEntity.amount,
+    feePaise: paymentEntity.fee,
+    taxPaise: paymentEntity.tax,
     subscriptionId: sub.id || paymentEntity.subscription_id || invoice.subscription_id || notes.subscriptionId,
     durationDays: notes.durationDays,
     startDate: notes.startDate,
@@ -66,6 +76,9 @@ async function markPaid({
   chargeAt,
   billingEnd,
   notesInstitution,
+  chargedPaise,
+  feePaise,
+  taxPaise,
 }) {
   let notes = {};
   let live = null;
@@ -100,10 +113,22 @@ async function markPaid({
     || ymdFromUnix(currentEnd)
     || ymdFromUnix(billingEnd)
     || ymdFromUnix(chargeAt);
-  const renewDate = razorpayEnd
+  const computedEnd = razorpayEnd
     || (alreadyPaid
       ? addPlanDuration(profile?.renewDate && profile.renewDate >= today() ? profile.renewDate : today(), days)
       : addPlanDuration(cycleStart, days));
+  const paidRupees = Number(chargedPaise || 0) / 100;
+  const reminderPay = String(notes.reason || '') === 'expiry-reminder';
+  const fullRenewal = paidRupees >= 100 || reminderPay;
+  const nextCycle = addPlanDuration(
+    profile?.renewDate && profile.renewDate >= today() ? profile.renewDate : today(),
+    days,
+  );
+  const renewDate = reminderPay || (fullRenewal && !(razorpayEnd && razorpayEnd > today()))
+    ? nextCycle
+    : fullRenewal
+      ? razorpayEnd
+      : keepCurrentCycleEnd(profile?.renewDate, computedEnd);
   const renewDateSource = razorpayEnd ? 'razorpay' : 'plan';
   const now = Date.now();
   const newCycle = existing && String(existing.paymentStatus) === 'PAID';
@@ -128,6 +153,21 @@ async function markPaid({
     paymentDate: now,
     updatedAt: now,
   };
+  const payId = razorpayPaymentId || existing?.razorpayPaymentId;
+  let livePay = null;
+  if (payId && (chargedPaise == null || feePaise == null)) {
+    livePay = await fetchPayment(payId);
+  }
+  const payNet = netFromRazorpayPayment(
+    livePay || { amount: chargedPaise, fee: feePaise, tax: taxPaise },
+    Number(nextPayment.amount || profile?.amount || 0),
+  );
+  if (payNet.grossAmount) {
+    nextPayment.grossAmount = payNet.grossAmount;
+    nextPayment.feeAmount = payNet.feeAmount;
+    nextPayment.netAmount = payNet.netAmount;
+    nextPayment.amount = payNet.netAmount;
+  }
   await dynamo.putPayment(nextPayment);
 
   if (profile) {
@@ -231,7 +271,7 @@ async function syncPendingProfile(profile) {
       profile = (await dynamo.getProfile(profile.cognitoId, profile.institution)) || profile;
     }
     profile = await applySubscriptionStatus(profile, live);
-    const razorpayEnd = subscriptionEndDate(live);
+    const razorpayEnd = keepCurrentCycleEnd(profile?.renewDate, subscriptionEndDate(live));
     if (profile && razorpayEnd && razorpayEnd !== profile.renewDate) {
       const now = Date.now();
       const next = {

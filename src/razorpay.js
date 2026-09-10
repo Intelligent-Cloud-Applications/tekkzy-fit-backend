@@ -54,10 +54,19 @@ function periodFromDays(days) {
   return { period: 'monthly', interval: 1, totalCount: 24 };
 }
 
-async function ensureRazorpayPlan({ gymPlanId, name, amount, durationDays }) {
+function cycleFromPlan({ durationDays, period, interval }) {
+  if (period && interval) {
+    const n = Math.max(1, Number(interval) || 1);
+    const totalCount = period === 'yearly' ? 5 : period === 'monthly' && n >= 6 ? 8 : period === 'monthly' && n >= 3 ? 12 : 24;
+    return { period, interval: n, totalCount };
+  }
+  return periodFromDays(durationDays);
+}
+
+async function ensureRazorpayPlan({ gymPlanId, name, amount, durationDays, period, interval }) {
   const rupees = Number(amount);
   const paise = Math.round(rupees * 100);
-  const cycle = periodFromDays(durationDays);
+  const cycle = cycleFromPlan({ durationDays, period, interval });
   const cacheKey = `${gymPlanId || name}:${paise}:${cycle.period}:${cycle.interval}`;
   if (planCache.has(cacheKey)) return { planId: planCache.get(cacheKey), ...cycle };
 
@@ -78,23 +87,27 @@ async function ensureRazorpayPlan({ gymPlanId, name, amount, durationDays }) {
     return { planId: match.id, ...cycle };
   }
 
-  const created = await rzp.plans.create({
-    period: cycle.period,
-    interval: cycle.interval,
-    item: {
-      name: `Tekkzy Fit · ${name || 'Membership'}`,
-      amount: paise,
-      currency: 'INR',
-      description: `${name || 'Membership'} gym subscription (${razorpayMode()})`,
-    },
-    notes: {
-      gymPlanId: String(gymPlanId || ''),
-      name: String(name || ''),
-      env: razorpayMode(),
-    },
-  });
-  planCache.set(cacheKey, created.id);
-  return { planId: created.id, ...cycle };
+  try {
+    const created = await rzp.plans.create({
+      period: cycle.period,
+      interval: cycle.interval,
+      item: {
+        name: `Tekkzy Fit · ${name || 'Membership'}`,
+        amount: paise,
+        currency: 'INR',
+        description: `${name || 'Membership'} gym subscription (${razorpayMode()})`,
+      },
+      notes: {
+        gymPlanId: String(gymPlanId || ''),
+        name: String(name || ''),
+        env: razorpayMode(),
+      },
+    });
+    planCache.set(cacheKey, created.id);
+    return { planId: created.id, ...cycle };
+  } catch (err) {
+    throw new Error(razorpayMessage(err));
+  }
 }
 
 async function ensureCustomer({ name, phone, email }) {
@@ -109,16 +122,18 @@ async function ensureCustomer({ name, phone, email }) {
 }
 
 function startAtUnix(startDate) {
-  if (!startDate) return undefined;
-  const start = new Date(`${startDate}T00:00:00`);
+  const day = String(startDate || '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return undefined;
+  const start = new Date(`${day}T10:00:00+05:30`);
   if (Number.isNaN(start.getTime())) return undefined;
-  const earliest = Date.now() + 16 * 60 * 1000;
+  const earliest = Date.now() + 20 * 60 * 1000;
   if (start.getTime() <= earliest) return undefined;
   return Math.floor(start.getTime() / 1000);
 }
 
 async function createSubscription({
   amount,
+  addonAmount,
   name,
   phone,
   email,
@@ -127,7 +142,12 @@ async function createSubscription({
   planId: gymPlanId,
   planName,
   durationDays,
+  period,
+  interval,
   startDate,
+  customerNotify = true,
+  addonName,
+  addonDescription,
 }) {
   const contact = indiaPhone(phone);
   const mail = validEmail(email);
@@ -142,8 +162,9 @@ async function createSubscription({
     name: planName || description || 'Membership',
     amount: rupees,
     durationDays,
+    period,
+    interval,
   });
-  const expireBy = Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60;
   const safeNotes = {};
   for (const [key, value] of Object.entries({ ...(notes || {}), env: razorpayMode() })) {
     if (value == null || value === '') continue;
@@ -151,22 +172,47 @@ async function createSubscription({
   }
 
   const startAt = startAtUnix(startDate);
+  if (startDate && !startAt) {
+    throw new Error('Subscription start date must be at least 20 minutes in the future');
+  }
+  const expireBy = Math.max(
+    Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60,
+    (startAt || 0) + 24 * 60 * 60,
+  );
+  const addonRupees = Number(addonAmount || 0);
+  const addons = addonRupees > 0
+    ? [{
+        item: {
+          name: addonName || 'Admission fee',
+          amount: Math.round(addonRupees * 100),
+          currency: 'INR',
+          description: addonDescription || 'One-time admission / joining fee',
+        },
+      }]
+    : undefined;
+  const notify = customerNotify !== false;
   const sub = await rzp.subscriptions.create({
     plan_id: plan.planId,
     total_count: plan.totalCount,
     quantity: 1,
-    customer_notify: true,
+    customer_notify: notify,
     expire_by: expireBy,
     notes: safeNotes,
-    notify_info: {
-      notify_phone: contact,
-      notify_email: mail,
-    },
+    ...(notify ? {
+      notify_info: {
+        notify_phone: contact,
+        notify_email: mail,
+      },
+    } : {}),
     ...(startAt ? { start_at: startAt } : {}),
+    ...(addons ? { addons } : {}),
   });
 
   const url = sub.short_url || sub.url || '';
   if (!url) throw new Error('Razorpay did not return a subscription link');
+  if (startAt && !sub.start_at && !sub.charge_at) {
+    throw new Error('Razorpay did not schedule the next due date');
+  }
 
   return {
     paymentLinkId: sub.id,
@@ -175,6 +221,8 @@ async function createSubscription({
     razorpayPlanId: plan.planId,
     razorpayCustomerId: '',
     status: String(sub.status || 'created').toUpperCase(),
+    startAt: sub.start_at || startAt,
+    chargeAt: sub.charge_at || startAt,
   };
 }
 
@@ -219,6 +267,27 @@ async function fetchSubscription(id) {
   } catch {
     return null;
   }
+}
+
+async function fetchPayment(id) {
+  if (!id) return null;
+  try {
+    return await client().payments.fetch(id);
+  } catch {
+    return null;
+  }
+}
+
+function netFromRazorpayPayment(pay, fallbackRupees = 0) {
+  const amountPaise = Number(pay?.amount ?? Math.round(Number(fallbackRupees || 0) * 100));
+  const fee = Number(pay?.fee || 0);
+  const tax = Number(pay?.tax || 0);
+  const netPaise = Math.max(0, amountPaise - fee - tax);
+  return {
+    grossAmount: amountPaise / 100,
+    feeAmount: (fee + tax) / 100,
+    netAmount: netPaise / 100,
+  };
 }
 
 function razorpayMessage(err) {
@@ -266,7 +335,10 @@ module.exports = {
   indiaPhone,
   createSubscription,
   createPaymentLink: createSubscription,
+  ensureRazorpayPlan,
   fetchSubscription,
+  fetchPayment,
+  netFromRazorpayPayment,
   pauseSubscription,
   resumeSubscription,
   mapSubscriptionStatus,

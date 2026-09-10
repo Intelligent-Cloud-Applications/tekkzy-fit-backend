@@ -13,6 +13,12 @@ const client = DynamoDBDocumentClient.from(new DynamoDBClient({ region: process.
 
 const PROFILE = process.env.PROFILE_TABLE_NAME || 'beta_user_profile';
 const PAYMENT = process.env.PAYMENT_TABLE_NAME || 'beta_payment';
+const REPORT = process.env.REPORT_TABLE_NAME || 'beta_monthly_report';
+const CODEGEN = process.env.CODEGEN_TABLE_NAME || 'code_generator_variables';
+const codegenClient = DynamoDBDocumentClient.from(
+  new DynamoDBClient({ region: process.env.CODEGEN_TABLE_REGION || 'us-east-1' }),
+  { marshallOptions: { removeUndefinedValues: true } },
+);
 
 function fallbackInstitution() {
   return process.env.INSTITUTION || 'Fitnessworld001';
@@ -51,7 +57,11 @@ async function listProfiles(institution = fallbackInstitution()) {
     items.push(...(out.Items || []));
     ExclusiveStartKey = out.LastEvaluatedKey;
   } while (ExclusiveStartKey);
-  return items.filter((row) => !row.userType || row.userType === 'member' || row.source === institution);
+  return items.filter((row) => {
+    const id = String(row.cognitoId || '');
+    if (id.startsWith('__')) return false;
+    return !row.userType || row.userType === 'member' || row.source === institution;
+  });
 }
 
 async function putPayment(item) {
@@ -107,6 +117,7 @@ async function paymentsForMember(cognitoId) {
 const BRIDGE_ID = '__devicebridge__';
 const CMD_PREFIX = '__devicecmd_';
 const RES_PREFIX = '__deviceres_';
+const PLAN_PREFIX = '__plan_';
 
 async function queryPrefix(institution, prefix) {
   const items = [];
@@ -148,6 +159,71 @@ async function getDeviceResult(institution, id) {
   return getProfile(`${RES_PREFIX}${id}`, institution);
 }
 
+function planKey(id) {
+  return `${PLAN_PREFIX}${String(id || '').trim()}`;
+}
+
+async function listPlans(institution) {
+  return queryPrefix(institution, PLAN_PREFIX);
+}
+
+async function getPlan(institution, id) {
+  return getProfile(planKey(id), institution);
+}
+
+async function putPlan(item) {
+  return putProfile(item);
+}
+
+async function deletePlan(institution, id) {
+  return deleteProfile(planKey(id), institution);
+}
+
+async function listReports(institution) {
+  const items = [];
+  let ExclusiveStartKey;
+  do {
+    const out = await client.send(
+      new QueryCommand({
+        TableName: REPORT,
+        KeyConditionExpression: 'institution = :institution',
+        ExpressionAttributeValues: { ':institution': institution },
+        ExclusiveStartKey,
+      }),
+    );
+    items.push(...(out.Items || []));
+    ExclusiveStartKey = out.LastEvaluatedKey;
+  } while (ExclusiveStartKey);
+  return items;
+}
+
+async function getReport(institution, monthKey) {
+  const out = await client.send(
+    new GetCommand({ TableName: REPORT, Key: { institution, cognitoIdAndMonth: monthKey } }),
+  );
+  return out.Item || null;
+}
+
+async function putReport(item) {
+  await client.send(new PutCommand({ TableName: REPORT, Item: item }));
+  return item;
+}
+
+async function getCodegen(institution) {
+  const out = await codegenClient.send(
+    new GetCommand({
+      TableName: CODEGEN,
+      Key: { institutionid: institution, index: '0' },
+    }),
+  );
+  return out.Item || null;
+}
+
+async function putCodegen(item) {
+  await codegenClient.send(new PutCommand({ TableName: CODEGEN, Item: item }));
+  return item;
+}
+
 module.exports = {
   fallbackInstitution,
   putProfile,
@@ -161,8 +237,18 @@ module.exports = {
   BRIDGE_ID,
   CMD_PREFIX,
   RES_PREFIX,
+  PLAN_PREFIX,
   putBridge,
   getBridge,
   listDeviceCmds,
   getDeviceResult,
+  listPlans,
+  getPlan,
+  putPlan,
+  deletePlan,
+  listReports,
+  getReport,
+  putReport,
+  getCodegen,
+  putCodegen,
 };

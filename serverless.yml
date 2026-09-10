@@ -14,6 +14,9 @@ provider:
     INSTITUTION: Fitnessworld001
     PROFILE_TABLE_NAME: ${self:custom.stage.${self:provider.stage}.profileTable}
     PAYMENT_TABLE_NAME: ${self:custom.stage.${self:provider.stage}.paymentTable}
+    REPORT_TABLE_NAME: ${self:custom.stage.${self:provider.stage}.reportTable}
+    CODEGEN_TABLE_NAME: ${self:custom.stage.${self:provider.stage}.codegenTable}
+    CODEGEN_TABLE_REGION: ${self:custom.stage.${self:provider.stage}.codegenRegion}
     RAZORPAY_MODE: ${self:custom.stage.${self:provider.stage}.razorpayMode}
     RAZORPAY_KEY_ID: ${self:custom.stage.${self:provider.stage}.razorpayKeyId}
     RAZORPAY_SECRET_KEY: ${self:custom.stage.${self:provider.stage}.razorpaySecret}
@@ -21,6 +24,8 @@ provider:
     RAZORPAY_TEST_SECRET_KEY: ${env:RAZORPAY_TEST_SECRET_KEY}
     RAZORPAY_WEBHOOK_SECRET: ${self:custom.stage.${self:provider.stage}.razorpayWebhook}
     GYM_API_KEY: ${env:GYM_API_KEY}
+    COGNITO_USER_POOL_ID: ${env:COGNITO_USER_POOL_ID}
+    COGNITO_CLIENT_ID: ${env:COGNITO_CLIENT_ID}
   iam:
     role:
       statements:
@@ -37,12 +42,29 @@ provider:
             - arn:aws:dynamodb:us-east-2:*:table/${self:custom.stage.${self:provider.stage}.profileTable}/index/*
             - arn:aws:dynamodb:us-east-2:*:table/${self:custom.stage.${self:provider.stage}.paymentTable}
             - arn:aws:dynamodb:us-east-2:*:table/${self:custom.stage.${self:provider.stage}.paymentTable}/index/*
+            - arn:aws:dynamodb:us-east-2:*:table/${self:custom.stage.${self:provider.stage}.reportTable}
+            - arn:aws:dynamodb:us-east-2:*:table/${self:custom.stage.${self:provider.stage}.reportTable}/index/*
+            - arn:aws:dynamodb:${self:custom.stage.${self:provider.stage}.codegenRegion}:*:table/${self:custom.stage.${self:provider.stage}.codegenTable}
+        - Effect: Allow
+          Action:
+            - cognito-idp:AdminInitiateAuth
+            - cognito-idp:ForgotPassword
+            - cognito-idp:ConfirmForgotPassword
+          Resource:
+            - arn:aws:cognito-idp:us-east-2:*:userpool/${env:COGNITO_USER_POOL_ID}
+        - Effect: Allow
+          Action:
+            - sns:Publish
+          Resource: '*'
 
 custom:
   stage:
     dev:
       profileTable: beta_user_profile
       paymentTable: beta_payment
+      reportTable: beta_monthly_report
+      codegenTable: beta_code_generator_variables
+      codegenRegion: us-east-2
       razorpayMode: test
       razorpayKeyId: ${env:RAZORPAY_TEST_KEY_ID}
       razorpaySecret: ${env:RAZORPAY_TEST_SECRET_KEY}
@@ -50,6 +72,9 @@ custom:
     prod:
       profileTable: userprofile
       paymentTable: payments
+      reportTable: monthly_report
+      codegenTable: code_generator_variables
+      codegenRegion: us-east-1
       razorpayMode: live
       razorpayKeyId: ${env:RAZORPAY_LIVE_KEY_ID}
       razorpaySecret: ${env:RAZORPAY_LIVE_SECRET_KEY}
@@ -69,6 +94,22 @@ custom:
     allowCredentials: false
 
 functions:
+  auth:
+    handler: src/auth.handler
+    events:
+      - http:
+          path: auth/login
+          method: ANY
+          cors: ${self:custom.cors}
+      - http:
+          path: auth/forgot
+          method: ANY
+          cors: ${self:custom.cors}
+      - http:
+          path: auth/confirm-forgot
+          method: ANY
+          cors: ${self:custom.cors}
+
   members:
     handler: src/members.handler
     events:
@@ -93,12 +134,32 @@ functions:
           method: ANY
           cors: ${self:custom.cors}
 
+  plans:
+    handler: src/plans.handler
+    events:
+      - http:
+          path: plans
+          method: ANY
+          cors: ${self:custom.cors}
+      - http:
+          path: plans/{id}
+          method: ANY
+          cors: ${self:custom.cors}
+
   devices:
     handler: src/devices.handler
     timeout: 29
     events:
       - http:
           path: devices/{proxy+}
+          method: ANY
+          cors: ${self:custom.cors}
+
+  settings:
+    handler: src/settings.handler
+    events:
+      - http:
+          path: settings
           method: ANY
           cors: ${self:custom.cors}
 
@@ -114,6 +175,30 @@ functions:
           method: ANY
           cors: ${self:custom.cors}
 
+  reports:
+    handler: src/reports.handler
+    events:
+      - http:
+          path: reports/monthly
+          method: ANY
+          cors: ${self:custom.cors}
+
+  reportsDaily:
+    handler: src/reports.daily
+
+  reminders:
+    handler: src/reminders.handler
+    timeout: 60
+    events:
+      - http:
+          path: reminders/run
+          method: ANY
+          cors: ${self:custom.cors}
+
+  remindersDaily:
+    handler: src/reminders.daily
+    timeout: 90
+
   webhook:
     handler: src/webhook.handler
     events:
@@ -125,3 +210,47 @@ functions:
           path: webhooks/razorpay
           method: GET
           cors: ${self:custom.cors}
+
+resources:
+  Resources:
+    ExpiryReminderScheduleRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: scheduler.amazonaws.com
+              Action: sts:AssumeRole
+              Condition:
+                StringEquals:
+                  aws:SourceAccount: !Ref AWS::AccountId
+        Policies:
+          - PolicyName: InvokeExpiryReminders
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action: lambda:InvokeFunction
+                  Resource: !GetAtt RemindersDailyLambdaFunction.Arn
+    ExpiryReminderSchedule:
+      Type: AWS::Scheduler::Schedule
+      Properties:
+        Name: ${self:service}-${self:provider.stage}-expiry-reminders-4am-ist
+        Description: Monthly report snapshot, then 2-day expiry SMS, daily at 4:00 AM IST
+        FlexibleTimeWindow:
+          Mode: 'OFF'
+        ScheduleExpression: cron(0 4 * * ? *)
+        ScheduleExpressionTimezone: Asia/Kolkata
+        State: ENABLED
+        Target:
+          Arn: !GetAtt RemindersDailyLambdaFunction.Arn
+          RoleArn: !GetAtt ExpiryReminderScheduleRole.Arn
+    ExpiryReminderSchedulePermission:
+      Type: AWS::Lambda::Permission
+      Properties:
+        FunctionName: !Ref RemindersDailyLambdaFunction
+        Action: lambda:InvokeFunction
+        Principal: scheduler.amazonaws.com
+        SourceAccount: !Ref AWS::AccountId

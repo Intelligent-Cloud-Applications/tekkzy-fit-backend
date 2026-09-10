@@ -43,20 +43,30 @@ exports.handler = async (event) => {
       if (!memberId) return json(400, { error: 'memberId is required' });
       const profile = await dynamo.getProfile(memberId, institution);
       if (!profile) return json(404, { error: 'Member not found' });
-      if (!profile.phoneNumber) return json(400, { error: 'Member phone is required to send the payment link' });
-      if (!profile.emailId) return json(400, { error: 'Member email is required to send the payment link' });
+      const phone = String(body.phone || body.phoneNumber || profile.phoneNumber || '').trim();
+      const email = String(body.email || body.emailId || profile.emailId || '').trim();
+      if (!phone) return json(400, { error: 'Member phone is required to send the payment link' });
+      if (!email) return json(400, { error: 'Member email is required to send the payment link' });
       const amount = Number(body.amount ?? profile.amount);
       const durationDays = Number(body.durationDays ?? profile.durationDays ?? 30);
       const paymentId = newId('pay');
+      const gymPlanId = body.planId || profile.planId;
+      const gymPlan = gymPlanId ? await dynamo.getPlan(institution, gymPlanId) : null;
+      const addonAmount = String(profile.paymentStatus || '').toUpperCase() === 'PAID'
+        ? 0
+        : Number(gymPlan?.addonAmount || 0);
       const link = await createSubscription({
         amount,
+        addonAmount,
         name: profile.userName,
-        phone: profile.phoneNumber,
-        email: profile.emailId,
+        phone,
+        email,
         description: `${body.planName || profile.planName || 'Membership'} · Tekkzy Fit`,
-        planId: body.planId || profile.planId,
+        planId: gymPlanId,
         planName: body.planName || profile.planName,
         durationDays,
+        period: gymPlan?.billingPeriod,
+        interval: gymPlan?.billingInterval,
         startDate: body.startDate || profile.joinDate,
         notes: {
           institution,
@@ -80,6 +90,8 @@ exports.handler = async (event) => {
       await dynamo.putPayment(payment);
       await dynamo.putProfile({
         ...profile,
+        phoneNumber: phone,
+        emailId: email,
         paymentStatus: 'PENDING',
         paymentLinkUrl: link.paymentLinkUrl,
         paymentLinkId: link.paymentLinkId,

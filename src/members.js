@@ -1,7 +1,7 @@
 const { json, parseBody, requireGymKey, pathId, method, institutionFrom } = require('./http');
 const dynamo = require('./dynamo');
 const { createSubscription, fetchSubscription, mapSubscriptionStatus, pauseSubscription, resumeSubscription } = require('./razorpay');
-const { toMember, profileFromBody, paymentItem, newId, newOfflineId, addPlanDuration, today } = require('./map');
+const { toMember, profileFromBody, paymentItem, newId, newOfflineId, addPlanDuration, today, applyAttendanceDays } = require('./map');
 const { refreshStaleSubscriptionStatuses, syncPendingProfile } = require('./syncPay');
 
 async function sendPayLink(profile, body) {
@@ -10,15 +10,23 @@ async function sendPayLink(profile, body) {
   if (!amount) throw new Error('Plan amount is required to create the subscription');
   const paymentId = newId('pay');
   const startDate = body.startDate || body.joinDate || profile.joinDate;
+  const gymPlanId = body.planId || profile.planId;
+  const gymPlan = gymPlanId ? await dynamo.getPlan(profile.institution, gymPlanId) : null;
+  const addonAmount = String(profile.paymentStatus || '').toUpperCase() === 'PAID'
+    ? 0
+    : Number(gymPlan?.addonAmount || 0);
   const link = await createSubscription({
     amount,
+    addonAmount,
     name: profile.userName,
     phone: profile.phoneNumber,
     email: profile.emailId,
     description: `${profile.planName || 'Membership'} · Tekkzy Fit`,
-    planId: body.planId || profile.planId,
+    planId: gymPlanId,
     planName: body.planName || profile.planName,
     durationDays,
+    period: gymPlan?.billingPeriod,
+    interval: gymPlan?.billingInterval,
     startDate,
     notes: {
       institution: profile.institution,
@@ -60,6 +68,86 @@ async function sendPayLink(profile, body) {
   };
   await dynamo.putProfile(next);
   return { profile: next, payment };
+}
+
+async function resolveRenewalPlan(profile) {
+  const institution = profile.institution;
+  let planId = String(profile.planId || '').trim();
+  let planName = String(profile.planName || '').trim() || 'Membership';
+  let amount = Number(profile.amount);
+  let durationDays = Number(profile.durationDays || 30);
+  let gymPlan = planId ? await dynamo.getPlan(institution, planId).catch(() => null) : null;
+  if (!gymPlan) {
+    const plans = await dynamo.listPlans(institution);
+    const needle = planName.toLowerCase();
+    gymPlan = plans.find((row) => String(row.name || '').trim().toLowerCase() === needle)
+      || (!(amount > 0) ? plans.find((row) => Number(row.price) > 0) : null);
+  }
+  if (gymPlan) {
+    planId = gymPlan.planId || planId;
+    planName = gymPlan.name || planName;
+    if (!(amount > 0)) amount = Number(gymPlan.price || 0);
+    durationDays = Number(gymPlan.durationDays || durationDays);
+  }
+  return { planId, planName, amount, durationDays, gymPlan };
+}
+
+async function ensureRenewalPayLink(profile) {
+  const resolved = await resolveRenewalPlan(profile);
+  if (!(resolved.amount > 0)) throw new Error('No plan amount to create a pay link');
+  const paymentId = newId('pay');
+  const cycleEnd = String(profile.renewDate || profile.deviceEnd || '').slice(0, 10);
+  const nextDue = cycleEnd ? addPlanDuration(cycleEnd, resolved.durationDays) : '';
+  const link = await createSubscription({
+    amount: resolved.amount,
+    addonAmount: resolved.amount,
+    addonName: 'Membership renewal',
+    addonDescription: `${resolved.planName || 'Membership'} renewal`,
+    name: profile.userName,
+    phone: profile.phoneNumber,
+    email: profile.emailId,
+    description: `${resolved.planName} · Tekkzy Fit`,
+    planId: resolved.planId,
+    planName: resolved.planName,
+    durationDays: resolved.durationDays,
+    period: resolved.gymPlan?.billingPeriod,
+    interval: resolved.gymPlan?.billingInterval,
+    startDate: nextDue,
+    customerNotify: true,
+    notes: {
+      institution: profile.institution,
+      memberId: profile.memberId || profile.cognitoId,
+      cognitoId: profile.cognitoId,
+      paymentId,
+      planId: String(resolved.planId || ''),
+      durationDays: String(resolved.durationDays),
+      startDate: nextDue,
+      reason: 'expiry-reminder',
+    },
+  });
+  const payment = paymentItem({
+    profile,
+    planId: resolved.planId,
+    planName: resolved.planName,
+    amount: resolved.amount,
+    durationDays: resolved.durationDays,
+    link,
+    paymentId,
+  });
+  await dynamo.putPayment(payment);
+  const next = {
+    ...profile,
+    paymentLinkUrl: link.paymentLinkUrl,
+    paymentLinkId: link.paymentLinkId,
+    lastPaymentId: payment.paymentId,
+    amount: resolved.amount,
+    durationDays: resolved.durationDays,
+    planId: resolved.planId || profile.planId,
+    planName: resolved.planName || profile.planName,
+    razorpaySubscriptionId: link.subscriptionId,
+  };
+  await dynamo.putProfile(next);
+  return { profile: next, url: link.paymentLinkUrl, reused: false };
 }
 
 function wantsOnlineLink(body) {
@@ -216,7 +304,13 @@ function cashEndDate(body, profile, durationDays) {
 }
 
 async function recordCash(profile, body) {
-  const amount = Number(body.amount ?? profile.amount ?? 0);
+  const gymPlanId = body.planId || profile.planId;
+  const gymPlan = gymPlanId ? await dynamo.getPlan(profile.institution, gymPlanId) : null;
+  const recurring = Number(body.amount ?? gymPlan?.price ?? profile.amount ?? 0);
+  const addonAmount = String(profile.paymentStatus || '').toUpperCase() === 'PAID'
+    ? 0
+    : Number(gymPlan?.addonAmount || 0);
+  const amount = recurring + addonAmount;
   const durationDays = Number(body.durationDays ?? profile.durationDays ?? 30);
   const paymentId = newOfflineId();
   const now = Date.now();
@@ -247,7 +341,9 @@ async function recordCash(profile, body) {
     createdAt: now,
     createdAtIso: new Date(now).toISOString(),
     source: profile.institution,
-    notes: 'Paid in cash at the desk',
+    notes: addonAmount > 0
+      ? `Paid in cash at the desk (₹${recurring} + ₹${addonAmount} admission)`
+      : 'Paid in cash at the desk',
   };
   await dynamo.putPayment(payment);
   const next = {
@@ -258,7 +354,7 @@ async function recordCash(profile, body) {
     paymentLinkUrl: '',
     paymentLinkId: '',
     lastPaymentId: paymentId,
-    amount,
+    amount: recurring,
     durationDays,
     planId: body.planId || profile.planId,
     planName: body.planName || profile.planName,
@@ -272,6 +368,8 @@ async function recordCash(profile, body) {
   await dynamo.putProfile(next);
   return { profile: next, payment };
 }
+
+exports.ensureRenewalPayLink = ensureRenewalPayLink;
 
 exports.handler = async (event) => {
   if (method(event) === 'OPTIONS') return json(200, { ok: true });
@@ -308,6 +406,16 @@ exports.handler = async (event) => {
         member: toMember(sent.profile),
         payment: paymentPayload(sent),
       });
+    }
+
+    if ((verb === 'PUT' || verb === 'PATCH') && id && body.recordAttendance) {
+      const existing = await findExistingProfile({ ...body, id }, institution);
+      if (!existing) return json(404, { error: 'Member not found' });
+      const days = Array.isArray(body.attendanceDays)
+        ? body.attendanceDays
+        : [body.attendanceDay || today()];
+      const saved = await dynamo.putProfile(applyAttendanceDays(existing, days));
+      return json(200, { member: toMember(saved) });
     }
 
     if ((verb === 'PUT' || verb === 'PATCH') && id) {

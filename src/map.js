@@ -147,6 +147,8 @@ function toMember(item) {
     status: expired ? 'INACTIVE' : item.status || 'ACTIVE',
     faceRegistered: Boolean(item.faceRegistered),
     deviceEnrollId: item.deviceEnrollId || '',
+    devicePhotoUrl: item.devicePhotoUrl || '',
+    deviceFingerprint: item.deviceFingerprint || '',
     deviceStart: item.deviceStart || item.joinDate || '',
     deviceEnd: item.deviceEnd || renewDate || '',
     deviceEndPending: Boolean(item.deviceEndPending),
@@ -165,6 +167,7 @@ function toMember(item) {
     durationDays: item.durationDays ?? null,
     planId: item.planId || '',
     planName: item.planName || '',
+    attendance: item.attendance && typeof item.attendance === 'object' ? item.attendance : {},
     amount: item.amount ?? null,
     paymentLinkUrl: paid ? '' : item.paymentLinkUrl || '',
     cognitoId: item.cognitoId,
@@ -199,7 +202,15 @@ function toPayment(item) {
     memberName: item.client || item.userName || '',
     phone: item.phone || item.phoneNumber || '',
     planId: item.planId || '',
-    amount: Number(item.amount || item.netAmount || 0),
+    amount: Number(
+      item.netAmount != null && String(item.paymentStatus || item.status || '').toUpperCase() === 'PAID'
+        && String(item.paymentMode || item.method || '').toUpperCase() !== 'CASH'
+        ? item.netAmount
+        : (item.amount || item.netAmount || 0),
+    ),
+    grossAmount: Number(item.grossAmount || item.amount || item.netAmount || 0),
+    feeAmount: Number(item.feeAmount || 0),
+    netAmount: Number(item.netAmount != null ? item.netAmount : (item.amount || 0)),
     date: new Date(dateNum).toISOString().slice(0, 10),
     method: String(item.paymentMode || item.method || 'RAZORPAY').toUpperCase() === 'CASH' ? 'CASH' : 'RAZORPAY',
     status: status === 'PAID' || status === 'CAPTURED' ? 'PAID' : status === 'FAILED' ? 'FAILED' : 'PENDING',
@@ -241,6 +252,9 @@ function profileFromBody(body, existing, institution = fallbackInstitution()) {
     emergencyContactName: body.emergencyContactName || existing?.emergencyContactName || '',
     emergencyContactPhone: body.emergencyContactPhone || existing?.emergencyContactPhone || '',
     deviceEnrollId: body.deviceEnrollId || existing?.deviceEnrollId || '',
+    devicePhotoUrl: body.devicePhotoUrl || existing?.devicePhotoUrl || '',
+    deviceFingerprint: body.deviceFingerprint || existing?.deviceFingerprint || '',
+    faceRegistered: body.faceRegistered != null ? Boolean(body.faceRegistered) : Boolean(existing?.faceRegistered),
     deviceStart: body.deviceStart || existing?.deviceStart || body.startDate || body.joinDate || existing?.joinDate || '',
     deviceEnd: body.deviceEnd || existing?.deviceEnd || '',
     deviceEndPending: body.deviceEndPending != null ? Boolean(body.deviceEndPending) : Boolean(existing?.deviceEndPending),
@@ -262,6 +276,36 @@ function profileFromBody(body, existing, institution = fallbackInstitution()) {
     createdAtIso: existing?.createdAtIso || new Date(existing?.createdAt || now).toISOString(),
     updatedAt: now,
     updatedAtIso: new Date(now).toISOString(),
+  };
+}
+
+function attendanceMonthKey(day) {
+  const raw = String(day || '').slice(0, 10);
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(raw)
+    ? new Date(`${raw}T12:00:00+05:30`)
+    : new Date();
+  return date.toLocaleString('en-US', { month: 'long', year: 'numeric', timeZone: 'Asia/Kolkata' }).replace(' ', '-');
+}
+
+function applyAttendanceDays(profile, days) {
+  const nextDays = { ...(profile.attendanceDays && typeof profile.attendanceDays === 'object' ? profile.attendanceDays : {}) };
+  const attendance = { ...(profile.attendance && typeof profile.attendance === 'object' ? profile.attendance : {}) };
+  let changed = false;
+  for (const value of days || []) {
+    const ymd = String(value || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd) || nextDays[ymd]) continue;
+    nextDays[ymd] = true;
+    const key = attendanceMonthKey(ymd);
+    attendance[key] = Number(attendance[key] || 0) + 1;
+    changed = true;
+  }
+  if (!changed) return profile;
+  return {
+    ...profile,
+    attendance,
+    attendanceDays: nextDays,
+    updatedAt: Date.now(),
+    updatedAtIso: new Date().toISOString(),
   };
 }
 
@@ -319,4 +363,6 @@ module.exports = {
   toPayment,
   profileFromBody,
   paymentItem,
+  applyAttendanceDays,
+  attendanceMonthKey,
 };
