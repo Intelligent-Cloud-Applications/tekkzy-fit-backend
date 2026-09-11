@@ -4,7 +4,7 @@ const dynamo = require('./dynamo');
 const reports = require('./reports');
 const { ensureRenewalPayLink } = require('./members');
 
-const sns = new SNSClient({ region: process.env.AWS_REGION || 'us-east-2' });
+const sns = new SNSClient({ region: process.env.AWS_REGION || 'us-east-1' });
 const REMINDER_DAYS = 2;
 
 function istToday() {

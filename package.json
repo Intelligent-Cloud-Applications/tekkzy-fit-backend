@@ -4,9 +4,9 @@
   "version": "1.0.0",
   "type": "commonjs",
   "scripts": {
-    "deploy": "serverless deploy --stage dev --region us-east-2",
-    "deploy:beta": "serverless deploy --stage dev --region us-east-2",
-    "deploy:prod": "serverless deploy --stage prod --region us-east-2",
+    "deploy": "serverless deploy --stage dev",
+    "deploy:beta": "serverless deploy --stage dev",
+    "deploy:prod": "serverless deploy --stage prod",
     "offline": "serverless offline"
   },
   "dependencies": {

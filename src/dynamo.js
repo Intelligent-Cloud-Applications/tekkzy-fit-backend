@@ -5,6 +5,7 @@ const {
   PutCommand,
   DeleteCommand,
   QueryCommand,
+  ScanCommand,
 } = require('@aws-sdk/lib-dynamodb');
 
 const client = DynamoDBDocumentClient.from(new DynamoDBClient({ region: process.env.AWS_REGION || 'us-east-2' }), {
@@ -76,7 +77,7 @@ async function getPayment(cognitoId, paymentId) {
   return out.Item || null;
 }
 
-async function listPayments(institution = fallbackInstitution()) {
+async function listPaymentsByIndex(institution) {
   const items = [];
   let ExclusiveStartKey;
   do {
@@ -94,6 +95,36 @@ async function listPayments(institution = fallbackInstitution()) {
     ExclusiveStartKey = out.LastEvaluatedKey;
   } while (ExclusiveStartKey);
   return items;
+}
+
+async function listPaymentsByScan(institution) {
+  const items = [];
+  let ExclusiveStartKey;
+  do {
+    const out = await client.send(
+      new ScanCommand({
+        TableName: PAYMENT,
+        FilterExpression: 'institution = :institution',
+        ExpressionAttributeValues: { ':institution': institution },
+        ExclusiveStartKey,
+      }),
+    );
+    items.push(...(out.Items || []));
+    ExclusiveStartKey = out.LastEvaluatedKey;
+  } while (ExclusiveStartKey);
+  return items.sort((a, b) => Number(b.paymentDate || 0) - Number(a.paymentDate || 0));
+}
+
+async function listPayments(institution = fallbackInstitution()) {
+  try {
+    return await listPaymentsByIndex(institution);
+  } catch (err) {
+    const name = err?.name || '';
+    if (name === 'ValidationException' || name === 'ResourceNotFoundException') {
+      return listPaymentsByScan(institution);
+    }
+    throw err;
+  }
 }
 
 async function paymentsForMember(cognitoId) {

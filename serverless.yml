@@ -6,7 +6,7 @@ provider:
   name: aws
   runtime: nodejs20.x
   stage: ${opt:stage, 'dev'}
-  region: ${opt:region, 'us-east-2'}
+  region: ${self:custom.stage.${self:provider.stage}.region}
   memorySize: 256
   timeout: 20
   environment:
@@ -24,8 +24,9 @@ provider:
     RAZORPAY_TEST_SECRET_KEY: ${env:RAZORPAY_TEST_SECRET_KEY}
     RAZORPAY_WEBHOOK_SECRET: ${self:custom.stage.${self:provider.stage}.razorpayWebhook}
     GYM_API_KEY: ${env:GYM_API_KEY}
-    COGNITO_USER_POOL_ID: ${env:COGNITO_USER_POOL_ID}
-    COGNITO_CLIENT_ID: ${env:COGNITO_CLIENT_ID}
+    COGNITO_USER_POOL_ID: ${self:custom.stage.${self:provider.stage}.cognitoPoolId}
+    COGNITO_CLIENT_ID: ${self:custom.stage.${self:provider.stage}.cognitoClientId}
+    COGNITO_REGION: ${self:custom.stage.${self:provider.stage}.cognitoRegion}
   iam:
     role:
       statements:
@@ -38,12 +39,12 @@ provider:
             - dynamodb:Query
             - dynamodb:Scan
           Resource:
-            - arn:aws:dynamodb:us-east-2:*:table/${self:custom.stage.${self:provider.stage}.profileTable}
-            - arn:aws:dynamodb:us-east-2:*:table/${self:custom.stage.${self:provider.stage}.profileTable}/index/*
-            - arn:aws:dynamodb:us-east-2:*:table/${self:custom.stage.${self:provider.stage}.paymentTable}
-            - arn:aws:dynamodb:us-east-2:*:table/${self:custom.stage.${self:provider.stage}.paymentTable}/index/*
-            - arn:aws:dynamodb:us-east-2:*:table/${self:custom.stage.${self:provider.stage}.reportTable}
-            - arn:aws:dynamodb:us-east-2:*:table/${self:custom.stage.${self:provider.stage}.reportTable}/index/*
+            - arn:aws:dynamodb:${self:custom.stage.${self:provider.stage}.region}:*:table/${self:custom.stage.${self:provider.stage}.profileTable}
+            - arn:aws:dynamodb:${self:custom.stage.${self:provider.stage}.region}:*:table/${self:custom.stage.${self:provider.stage}.profileTable}/index/*
+            - arn:aws:dynamodb:${self:custom.stage.${self:provider.stage}.region}:*:table/${self:custom.stage.${self:provider.stage}.paymentTable}
+            - arn:aws:dynamodb:${self:custom.stage.${self:provider.stage}.region}:*:table/${self:custom.stage.${self:provider.stage}.paymentTable}/index/*
+            - arn:aws:dynamodb:${self:custom.stage.${self:provider.stage}.region}:*:table/${self:custom.stage.${self:provider.stage}.reportTable}
+            - arn:aws:dynamodb:${self:custom.stage.${self:provider.stage}.region}:*:table/${self:custom.stage.${self:provider.stage}.reportTable}/index/*
             - arn:aws:dynamodb:${self:custom.stage.${self:provider.stage}.codegenRegion}:*:table/${self:custom.stage.${self:provider.stage}.codegenTable}
         - Effect: Allow
           Action:
@@ -51,7 +52,7 @@ provider:
             - cognito-idp:ForgotPassword
             - cognito-idp:ConfirmForgotPassword
           Resource:
-            - arn:aws:cognito-idp:us-east-2:*:userpool/${env:COGNITO_USER_POOL_ID}
+            - arn:aws:cognito-idp:${self:custom.stage.${self:provider.stage}.cognitoRegion}:*:userpool/${self:custom.stage.${self:provider.stage}.cognitoPoolId}
         - Effect: Allow
           Action:
             - sns:Publish
@@ -60,21 +61,29 @@ provider:
 custom:
   stage:
     dev:
+      region: us-east-2
       profileTable: beta_user_profile
       paymentTable: beta_payment
       reportTable: beta_monthly_report
       codegenTable: beta_code_generator_variables
       codegenRegion: us-east-2
+      cognitoRegion: us-east-2
+      cognitoPoolId: ${env:COGNITO_USER_POOL_ID}
+      cognitoClientId: ${env:COGNITO_CLIENT_ID}
       razorpayMode: test
       razorpayKeyId: ${env:RAZORPAY_TEST_KEY_ID}
       razorpaySecret: ${env:RAZORPAY_TEST_SECRET_KEY}
       razorpayWebhook: ${env:RAZORPAY_WEBHOOK_SECRET}
     prod:
-      profileTable: userprofile
-      paymentTable: payments
+      region: us-east-1
+      profileTable: user_profile
+      paymentTable: payment
       reportTable: monthly_report
       codegenTable: code_generator_variables
       codegenRegion: us-east-1
+      cognitoRegion: us-east-2
+      cognitoPoolId: ${env:COGNITO_USER_POOL_ID}
+      cognitoClientId: ${env:COGNITO_CLIENT_ID}
       razorpayMode: live
       razorpayKeyId: ${env:RAZORPAY_LIVE_KEY_ID}
       razorpaySecret: ${env:RAZORPAY_LIVE_SECRET_KEY}

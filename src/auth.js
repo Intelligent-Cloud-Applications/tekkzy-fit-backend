@@ -6,7 +6,9 @@ const {
 } = require('@aws-sdk/client-cognito-identity-provider');
 const { json, parseBody, requireGymKey, method } = require('./http');
 
-const cognito = new CognitoIdentityProviderClient({});
+const cognito = new CognitoIdentityProviderClient({
+  region: process.env.COGNITO_REGION || process.env.AWS_REGION,
+});
 
 function poolId() {
   return String(process.env.COGNITO_USER_POOL_ID || '').trim();
