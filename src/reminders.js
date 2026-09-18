@@ -2,7 +2,7 @@ const { SNSClient, PublishCommand } = require('@aws-sdk/client-sns');
 const { json, parseBody, requireGymKey, method, institutionFrom } = require('./http');
 const dynamo = require('./dynamo');
 const reports = require('./reports');
-const { ensureRenewalPayLink } = require('./members');
+const { ensureRenewalPayLink, resumeDueDateHolds } = require('./members');
 
 const sns = new SNSClient({ region: process.env.AWS_REGION || 'us-east-1' });
 const REMINDER_DAYS = 2;
@@ -214,7 +214,14 @@ exports.daily = async () => {
     console.error('daily report', err);
   }
   const reminders = await runExpiryReminders(institution);
-  const result = { ok: true, report, reportError, reminders };
+  let billing = null;
+  try {
+    billing = { resumed: await resumeDueDateHolds(institution) };
+  } catch (err) {
+    console.error('resume due date holds', err);
+    billing = { error: err instanceof Error ? err.message : 'resume failed' };
+  }
+  const result = { ok: true, report, reportError, reminders, billing };
   console.log('daily job done', JSON.stringify({
     reportOk: Boolean(report) && !reportError,
     reportError,

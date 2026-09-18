@@ -1,7 +1,7 @@
 const { json, parseBody, requireGymKey, pathId, method, institutionFrom } = require('./http');
 const dynamo = require('./dynamo');
 const { createSubscription, mapSubscriptionStatus } = require('./razorpay');
-const { toPayment, paymentItem, newId } = require('./map');
+const { toPayment, paymentItem, newId, prepaidCharge } = require('./map');
 
 exports.handler = async (event) => {
   if (method(event) === 'OPTIONS') return json(200, { ok: true });
@@ -55,9 +55,17 @@ exports.handler = async (event) => {
       const addonAmount = String(profile.paymentStatus || '').toUpperCase() === 'PAID'
         ? 0
         : Number(gymPlan?.addonAmount || 0);
-      const link = await createSubscription({
+      const charge = prepaidCharge({
         amount,
         addonAmount,
+        startDate: body.startDate || profile.joinDate,
+        durationDays,
+      });
+      const link = await createSubscription({
+        amount,
+        addonAmount: charge.addonAmount,
+        addonName: charge.addonName,
+        addonDescription: charge.addonDescription,
         name: profile.userName,
         phone,
         email,
@@ -67,7 +75,7 @@ exports.handler = async (event) => {
         durationDays,
         period: gymPlan?.billingPeriod,
         interval: gymPlan?.billingInterval,
-        startDate: body.startDate || profile.joinDate,
+        startDate: charge.razorpayStartDate,
         notes: {
           institution,
           memberId: profile.memberId || profile.cognitoId,
@@ -75,7 +83,8 @@ exports.handler = async (event) => {
           paymentId,
           planId: String(body.planId || profile.planId || ''),
           durationDays: String(durationDays),
-          startDate: String(body.startDate || profile.joinDate || ''),
+          startDate: String(charge.membershipStart || ''),
+          ...(charge.futureStart ? { prepaidStart: '1' } : {}),
         },
       });
       const payment = paymentItem({
@@ -94,7 +103,6 @@ exports.handler = async (event) => {
         emailId: email,
         paymentStatus: 'PENDING',
         paymentLinkUrl: link.paymentLinkUrl,
-        paymentLinkId: link.paymentLinkId,
         razorpaySubscriptionId: link.subscriptionId,
         subscriptionStatus: mapSubscriptionStatus(link.status) || 'PENDING',
         subscriptionStatusAt: Date.now(),
@@ -103,6 +111,10 @@ exports.handler = async (event) => {
         durationDays,
         planId: body.planId || profile.planId,
         planName: body.planName || profile.planName,
+        joinDate: charge.membershipStart || profile.joinDate,
+        renewDate: charge.cycleEnd,
+        deviceStart: profile.deviceStart || charge.membershipStart || profile.joinDate,
+        deviceEnd: charge.cycleEnd,
       });
       return json(201, toPayment(payment));
     }

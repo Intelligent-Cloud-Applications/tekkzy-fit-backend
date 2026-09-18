@@ -119,17 +119,21 @@ async function markPaid({
       : addPlanDuration(cycleStart, days));
   const paidRupees = Number(chargedPaise || 0) / 100;
   const reminderPay = String(notes.reason || '') === 'expiry-reminder';
+  const prepaidStart = String(notes.prepaidStart || '') === '1';
   const fullRenewal = paidRupees >= 100 || reminderPay;
   const nextCycle = addPlanDuration(
     profile?.renewDate && profile.renewDate >= today() ? profile.renewDate : today(),
     days,
   );
-  const renewDate = reminderPay || (fullRenewal && !(razorpayEnd && razorpayEnd > today()))
-    ? nextCycle
-    : fullRenewal
-      ? razorpayEnd
-      : keepCurrentCycleEnd(profile?.renewDate, computedEnd);
-  const renewDateSource = razorpayEnd ? 'razorpay' : 'plan';
+  const membershipEnd = addPlanDuration(cycleStart, days);
+  const renewDate = prepaidStart
+    ? membershipEnd
+    : reminderPay || (fullRenewal && !(razorpayEnd && razorpayEnd > today()))
+      ? nextCycle
+      : fullRenewal
+        ? razorpayEnd
+        : keepCurrentCycleEnd(profile?.renewDate, computedEnd);
+  const renewDateSource = prepaidStart ? 'plan' : (razorpayEnd ? 'razorpay' : 'plan');
   const now = Date.now();
   const newCycle = existing && String(existing.paymentStatus) === 'PAID';
   const nextPayment = {
@@ -184,6 +188,7 @@ async function markPaid({
       razorpaySubscriptionId: subscriptionId || profile.razorpaySubscriptionId,
       subscriptionStatus: live ? (mapSubscriptionStatus(live.status) || profile.subscriptionStatus) : profile.subscriptionStatus,
       subscriptionStatusAt: Date.now(),
+      billingResumeAt: '',
       deviceStart: profile.deviceStart || cycleStart,
       deviceEnd: renewDate,
       deviceEndPending: true,
@@ -207,6 +212,11 @@ async function applySubscriptionStatus(profile, live) {
     subscriptionStatusAt: Date.now(),
     razorpaySubscriptionId: live.id || profile.razorpaySubscriptionId,
   };
+  const holdUntil = String(profile.billingResumeAt || '').slice(0, 10);
+  if (status === 'PAUSED' && holdUntil && holdUntil >= today()) {
+    next.subscriptionStatus = profile.subscriptionStatus === 'PAUSED' ? 'ACTIVE' : (profile.subscriptionStatus || 'ACTIVE');
+    next.status = 'ACTIVE';
+  }
   await dynamo.putProfile(next);
   return next;
 }
@@ -229,6 +239,11 @@ async function saveSubscriptionStatus({ cognitoId, subscriptionId, institution, 
     subscriptionStatusAt: Date.now(),
     razorpaySubscriptionId: subscriptionId || profile.razorpaySubscriptionId,
   };
+  const holdUntil = String(profile.billingResumeAt || '').slice(0, 10);
+  if (mapped === 'PAUSED' && holdUntil && holdUntil >= today()) {
+    next.subscriptionStatus = profile.subscriptionStatus === 'PAUSED' ? 'ACTIVE' : (profile.subscriptionStatus || 'ACTIVE');
+    next.status = 'ACTIVE';
+  }
   await dynamo.putProfile(next);
   return next;
 }
@@ -271,8 +286,9 @@ async function syncPendingProfile(profile) {
       profile = (await dynamo.getProfile(profile.cognitoId, profile.institution)) || profile;
     }
     profile = await applySubscriptionStatus(profile, live);
+    const held = profile?.renewDateSource === 'extended' || profile?.billingResumeAt;
     const razorpayEnd = keepCurrentCycleEnd(profile?.renewDate, subscriptionEndDate(live));
-    if (profile && razorpayEnd && razorpayEnd !== profile.renewDate) {
+    if (profile && !held && razorpayEnd && razorpayEnd !== profile.renewDate) {
       const now = Date.now();
       const next = {
         ...profile,

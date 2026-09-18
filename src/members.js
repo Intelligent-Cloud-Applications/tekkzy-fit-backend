@@ -1,7 +1,10 @@
+const { SNSClient, PublishCommand } = require('@aws-sdk/client-sns');
 const { json, parseBody, requireGymKey, pathId, method, institutionFrom } = require('./http');
 const dynamo = require('./dynamo');
-const { createSubscription, fetchSubscription, mapSubscriptionStatus, pauseSubscription, resumeSubscription } = require('./razorpay');
-const { toMember, profileFromBody, paymentItem, newId, newOfflineId, addPlanDuration, today, applyAttendanceDays } = require('./map');
+const { createSubscription, fetchSubscription, mapSubscriptionStatus, pauseSubscription, resumeSubscription, deferSubscriptionCharge, hostedPayUrl, indiaPhone } = require('./razorpay');
+
+const sns = new SNSClient({ region: process.env.AWS_REGION || 'us-east-1' });
+const { toMember, profileFromBody, paymentItem, newId, newOfflineId, addPlanDuration, prepaidCharge, today, applyAttendanceDays, addCalendarDays, dueAfterPause, diffDays } = require('./map');
 const { refreshStaleSubscriptionStatuses, syncPendingProfile } = require('./syncPay');
 
 async function sendPayLink(profile, body) {
@@ -15,9 +18,12 @@ async function sendPayLink(profile, body) {
   const addonAmount = String(profile.paymentStatus || '').toUpperCase() === 'PAID'
     ? 0
     : Number(gymPlan?.addonAmount || 0);
+  const charge = prepaidCharge({ amount, addonAmount, startDate, durationDays });
   const link = await createSubscription({
     amount,
-    addonAmount,
+    addonAmount: charge.addonAmount,
+    addonName: charge.addonName,
+    addonDescription: charge.addonDescription,
     name: profile.userName,
     phone: profile.phoneNumber,
     email: profile.emailId,
@@ -27,7 +33,7 @@ async function sendPayLink(profile, body) {
     durationDays,
     period: gymPlan?.billingPeriod,
     interval: gymPlan?.billingInterval,
-    startDate,
+    startDate: charge.razorpayStartDate,
     notes: {
       institution: profile.institution,
       memberId: profile.memberId || profile.cognitoId,
@@ -35,11 +41,12 @@ async function sendPayLink(profile, body) {
       paymentId,
       planId: String(body.planId || profile.planId || ''),
       durationDays: String(durationDays),
-      startDate: String(startDate || ''),
+      startDate: String(charge.membershipStart || ''),
+      ...(charge.futureStart ? { prepaidStart: '1' } : {}),
     },
   });
   const payment = paymentItem({
-    profile: { ...profile, joinDate: startDate || profile.joinDate },
+    profile: { ...profile, joinDate: charge.membershipStart || profile.joinDate },
     planId: body.planId || profile.planId,
     planName: body.planName || profile.planName,
     amount,
@@ -52,7 +59,6 @@ async function sendPayLink(profile, body) {
     ...profile,
     paymentStatus: 'PENDING',
     paymentLinkUrl: link.paymentLinkUrl,
-    paymentLinkId: link.paymentLinkId,
     razorpaySubscriptionId: link.subscriptionId,
     subscriptionStatus: mapSubscriptionStatus(link.status) || 'PENDING',
     subscriptionStatusAt: Date.now(),
@@ -61,10 +67,10 @@ async function sendPayLink(profile, body) {
     durationDays,
     planId: body.planId || profile.planId,
     planName: body.planName || profile.planName,
-    joinDate: startDate || profile.joinDate,
-    renewDate: addPlanDuration(startDate || today(), durationDays),
-    deviceStart: profile.deviceStart || startDate || profile.joinDate,
-    deviceEnd: addPlanDuration(startDate || today(), durationDays),
+    joinDate: charge.membershipStart || profile.joinDate,
+    renewDate: charge.cycleEnd,
+    deviceStart: profile.deviceStart || charge.membershipStart || profile.joinDate,
+    deviceEnd: charge.cycleEnd,
   };
   await dynamo.putProfile(next);
   return { profile: next, payment };
@@ -80,13 +86,13 @@ async function resolveRenewalPlan(profile) {
   if (!gymPlan) {
     const plans = await dynamo.listPlans(institution);
     const needle = planName.toLowerCase();
-    gymPlan = plans.find((row) => String(row.name || '').trim().toLowerCase() === needle)
-      || (!(amount > 0) ? plans.find((row) => Number(row.price) > 0) : null);
+    gymPlan = plans.find((row) => String(row.name || row.heading || '').trim().toLowerCase() === needle)
+      || (!(amount > 0) ? plans.find((row) => Number(row.price || row.amount) > 0) : null);
   }
   if (gymPlan) {
-    planId = gymPlan.planId || planId;
-    planName = gymPlan.name || planName;
-    if (!(amount > 0)) amount = Number(gymPlan.price || 0);
+    planId = gymPlan.productId || planId;
+    planName = gymPlan.name || gymPlan.heading || planName;
+    if (!(amount > 0)) amount = Number(gymPlan.price != null ? gymPlan.price : Number(gymPlan.amount || 0) / 100);
     durationDays = Number(gymPlan.durationDays || durationDays);
   }
   return { planId, planName, amount, durationDays, gymPlan };
@@ -138,7 +144,6 @@ async function ensureRenewalPayLink(profile) {
   const next = {
     ...profile,
     paymentLinkUrl: link.paymentLinkUrl,
-    paymentLinkId: link.paymentLinkId,
     lastPaymentId: payment.paymentId,
     amount: resolved.amount,
     durationDays: resolved.durationDays,
@@ -148,6 +153,40 @@ async function ensureRenewalPayLink(profile) {
   };
   await dynamo.putProfile(next);
   return { profile: next, url: link.paymentLinkUrl, reused: false };
+}
+
+function prettyDue(ymd) {
+  const [year, month, day] = String(ymd || '').split('-').map(Number);
+  if (!year || !month || !day) return ymd || '';
+  return new Date(Date.UTC(year, month - 1, day)).toLocaleDateString('en-IN', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    timeZone: 'UTC',
+  });
+}
+
+async function sendPayLinkSms(profile, url, dueYmd) {
+  const phone = indiaPhone(profile.phoneNumber || profile.phone);
+  const link = String(url || '').trim();
+  if (!phone || !link) return false;
+  const name = String(profile.firstName || profile.userName || 'Member').trim().split(/\s+/)[0] || 'Member';
+  try {
+    await sns.send(new PublishCommand({
+      PhoneNumber: phone,
+      Message: `Dear ${name}, greetings from Tekkzy Fit. Your membership due date is now ${prettyDue(dueYmd)}. Authorize UPI here: ${link} Thank you, Tekkzy Fit.`,
+      MessageAttributes: {
+        'AWS.SNS.SMS.SMSType': {
+          DataType: 'String',
+          StringValue: 'Transactional',
+        },
+      },
+    }));
+    return true;
+  } catch (err) {
+    console.error('pay link sms failed', err);
+    return false;
+  }
 }
 
 function deskMethod(body) {
@@ -235,40 +274,194 @@ async function findExistingProfile(body, institution) {
   return null;
 }
 
+async function applyDueDateExtend(existing, profile, body) {
+  if (!existing) return profile;
+  const nextEnd = String(body.renewDate || body.deviceEnd || existing.renewDate || profile.renewDate || '').slice(0, 10);
+  const prevEnd = String(existing.renewDate || existing.deviceEnd || '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(nextEnd)) return profile;
+  const cancelled = ['CANCELLED', 'CANCELED', 'COMPLETED', 'EXPIRED'].includes(String(existing.subscriptionStatus || '').toUpperCase());
+  const extending = Boolean(body.extendDueDate) || (prevEnd && nextEnd > prevEnd) || cancelled;
+  if (!extending || (nextEnd === prevEnd && !cancelled)) return profile;
+
+  const subId = existing.razorpaySubscriptionId || profile.razorpaySubscriptionId;
+  let deferred = false;
+  let live = null;
+  if (subId) {
+    const shifted = await deferSubscriptionCharge(subId, nextEnd, {
+      phone: profile.phoneNumber,
+      email: profile.emailId,
+      amount: profile.amount,
+      planName: profile.planName,
+    });
+    live = shifted.live;
+    deferred = Boolean(shifted.deferred);
+  }
+  const nextSubId = live?.id || subId;
+  const link = hostedPayUrl(live);
+  const liveStatus = String(live?.status || '').toLowerCase();
+  const needsAuth = Boolean(link) && ['created', 'pending'].includes(liveStatus);
+  let lastPaymentId = profile.lastPaymentId;
+  if (needsAuth) {
+    const paymentId = newId('pay');
+    lastPaymentId = paymentId;
+    await dynamo.putPayment(paymentItem({
+      profile,
+      planId: profile.planId,
+      planName: profile.planName,
+      amount: profile.amount,
+      durationDays: profile.durationDays,
+      link: {
+        paymentLinkUrl: link,
+        subscriptionId: nextSubId,
+        razorpayPlanId: live?.plan_id,
+      },
+      paymentId,
+    }));
+    await sendPayLinkSms(profile, link, nextEnd);
+  }
+  return {
+    ...profile,
+    razorpaySubscriptionId: nextSubId,
+    lastPaymentId,
+    renewDate: nextEnd,
+    rePaymentDate: nextEnd,
+    deviceEnd: nextEnd,
+    deviceEndPending: true,
+    renewDateSource: subId ? 'extended' : 'manual',
+    billingResumeAt: deferred ? nextEnd : '',
+    paymentLinkUrl: needsAuth ? link : hostedPayUrl(profile.paymentLinkUrl),
+    status: 'ACTIVE',
+    subscriptionStatus: needsAuth
+      ? 'PENDING'
+      : (mapSubscriptionStatus(live?.status) === 'PAUSED' ? 'ACTIVE' : mapSubscriptionStatus(live?.status) || profile.subscriptionStatus || 'ACTIVE'),
+    subscriptionStatusAt: Date.now(),
+  };
+}
+
+async function resumeDueDateHolds(institution) {
+  const rows = await dynamo.listProfiles(institution);
+  const todayIst = today();
+  let resumed = 0;
+  for (const row of rows) {
+    const due = String(row.billingResumeAt || '').slice(0, 10);
+    if (!due || due > todayIst) continue;
+    const subId = row.razorpaySubscriptionId;
+    if (!subId) {
+      await dynamo.putProfile({ ...row, billingResumeAt: '' });
+      continue;
+    }
+    try {
+      const live = await fetchSubscription(subId);
+      const status = String(live?.status || '').toLowerCase();
+      if (['paused', 'halted'].includes(status)) await resumeSubscription(subId);
+      await dynamo.putProfile({
+        ...row,
+        billingResumeAt: '',
+        status: 'ACTIVE',
+        subscriptionStatus: 'ACTIVE',
+        subscriptionStatusAt: Date.now(),
+        updatedAt: Date.now(),
+        updatedAtIso: new Date().toISOString(),
+      });
+      resumed += 1;
+    } catch (err) {
+      console.error('resume due date hold', row.cognitoId, err);
+    }
+  }
+  return resumed;
+}
+
 async function applySubscriptionAction(existing, profile, body) {
   const action = String(body.subscriptionAction || '').toLowerCase();
   if (action !== 'pause' && action !== 'resume') return profile;
   const subId = existing?.razorpaySubscriptionId || profile.razorpaySubscriptionId;
+  const currentDue = String(existing?.renewDate || existing?.deviceEnd || profile.renewDate || '').slice(0, 10);
   if (!subId) {
+    if (action === 'pause') {
+      const pausedAt = today();
+      return {
+        ...profile,
+        status: 'SUSPENDED',
+        pausedAt,
+        pausedRenewDate: currentDue,
+        deviceEnd: addCalendarDays(pausedAt, -1),
+        deviceEndPending: true,
+      };
+    }
+    const newDue = dueAfterPause({
+      pausedAt: existing?.pausedAt || profile.pausedAt,
+      oldDue: existing?.pausedRenewDate || currentDue,
+      resumedAt: today(),
+    });
     return {
       ...profile,
-      status: action === 'pause' ? 'SUSPENDED' : 'ACTIVE',
+      status: 'ACTIVE',
+      pausedAt: '',
+      pausedRenewDate: '',
+      renewDate: newDue,
+      rePaymentDate: newDue,
+      deviceEnd: newDue,
+      deviceEndPending: true,
+      renewDateSource: 'manual',
     };
   }
   const live = await fetchSubscription(subId);
   const liveStatus = String(live?.status || '').toLowerCase();
   if (action === 'pause') {
+    const pausedAt = today();
     const nextLive = ['paused', 'halted'].includes(liveStatus)
       ? live
-      : ['created', 'pending'].includes(liveStatus)
-        ? live
-        : await pauseSubscription(subId);
+      : liveStatus === 'active'
+        ? await pauseSubscription(subId)
+        : live;
     return {
       ...profile,
       status: 'SUSPENDED',
-      subscriptionStatus: mapSubscriptionStatus(nextLive?.status) || (['created', 'pending'].includes(liveStatus) ? 'PENDING' : 'PAUSED'),
+      pausedAt,
+      pausedRenewDate: currentDue,
+      deviceEnd: addCalendarDays(pausedAt, -1),
+      deviceEndPending: true,
+      subscriptionStatus: 'PAUSED',
       subscriptionStatusAt: Date.now(),
+      razorpaySubscriptionId: nextLive?.id || subId,
     };
   }
-  const nextLive = ['active', 'authenticated'].includes(liveStatus)
-    ? live
-    : ['cancelled', 'canceled', 'completed', 'expired'].includes(liveStatus)
-      ? live
-      : await resumeSubscription(subId);
+  const pausedAt = String(existing?.pausedAt || profile.pausedAt || today()).slice(0, 10);
+  const oldDue = String(existing?.pausedRenewDate || currentDue).slice(0, 10);
+  const resumedAt = today();
+  const newDue = dueAfterPause({ pausedAt, oldDue, resumedAt });
+  const remaining = oldDue ? Math.max(0, diffDays(oldDue, pausedAt)) : 0;
+  let nextLive = live;
+  let deferred = false;
+  if (remaining > 0) {
+    if (['paused', 'halted'].includes(liveStatus)) {
+      deferred = true;
+    } else {
+      const shifted = await deferSubscriptionCharge(subId, newDue, {
+        phone: profile.phoneNumber,
+        email: profile.emailId,
+        amount: profile.amount,
+        planName: profile.planName,
+      });
+      nextLive = shifted.live || live;
+      deferred = true;
+    }
+  } else if (['paused', 'halted'].includes(liveStatus)) {
+    nextLive = await resumeSubscription(subId);
+  }
   return {
     ...profile,
     status: 'ACTIVE',
-    subscriptionStatus: mapSubscriptionStatus(nextLive?.status) || profile.subscriptionStatus,
+    pausedAt: '',
+    pausedRenewDate: '',
+    renewDate: remaining > 0 ? newDue : addPlanDuration(resumedAt, profile.durationDays || existing?.durationDays || 30),
+    rePaymentDate: remaining > 0 ? newDue : addPlanDuration(resumedAt, profile.durationDays || existing?.durationDays || 30),
+    deviceEnd: remaining > 0 ? newDue : addPlanDuration(resumedAt, profile.durationDays || existing?.durationDays || 30),
+    deviceEndPending: true,
+    renewDateSource: 'extended',
+    billingResumeAt: deferred && remaining > 0 ? newDue : '',
+    razorpaySubscriptionId: nextLive?.id || subId,
+    subscriptionStatus: mapSubscriptionStatus(nextLive?.status) === 'PAUSED' ? 'ACTIVE' : (mapSubscriptionStatus(nextLive?.status) || 'ACTIVE'),
     subscriptionStatusAt: Date.now(),
   };
 }
@@ -378,6 +571,7 @@ async function recordCash(profile, body) {
 }
 
 exports.ensureRenewalPayLink = ensureRenewalPayLink;
+exports.resumeDueDateHolds = resumeDueDateHolds;
 
 exports.handler = async (event) => {
   if (method(event) === 'OPTIONS') return json(200, { ok: true });
@@ -430,7 +624,8 @@ exports.handler = async (event) => {
       const existing = await findExistingProfile({ ...body, id }, institution);
       if (body.subscriptionAction && !existing) return json(404, { error: 'Member not found' });
       const profile = profileFromBody(body, existing, institution);
-      const held = await applySubscriptionAction(existing, profile, body);
+      const extended = await applyDueDateExtend(existing, profile, body);
+      const held = await applySubscriptionAction(existing, extended, body);
       const sent = await applyPayment(held, body);
       return json(200, {
         member: toMember(sent.profile),

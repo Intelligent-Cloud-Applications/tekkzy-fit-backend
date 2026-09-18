@@ -14,6 +14,7 @@ provider:
     INSTITUTION: Fitnessworld001
     PROFILE_TABLE_NAME: ${self:custom.stage.${self:provider.stage}.profileTable}
     PAYMENT_TABLE_NAME: ${self:custom.stage.${self:provider.stage}.paymentTable}
+    PRODUCT_TABLE_NAME: ${self:custom.stage.${self:provider.stage}.productTable}
     REPORT_TABLE_NAME: ${self:custom.stage.${self:provider.stage}.reportTable}
     CODEGEN_TABLE_NAME: ${self:custom.stage.${self:provider.stage}.codegenTable}
     CODEGEN_TABLE_REGION: ${self:custom.stage.${self:provider.stage}.codegenRegion}
@@ -45,6 +46,8 @@ provider:
             - arn:aws:dynamodb:${self:custom.stage.${self:provider.stage}.region}:*:table/${self:custom.stage.${self:provider.stage}.paymentTable}/index/*
             - arn:aws:dynamodb:${self:custom.stage.${self:provider.stage}.region}:*:table/${self:custom.stage.${self:provider.stage}.reportTable}
             - arn:aws:dynamodb:${self:custom.stage.${self:provider.stage}.region}:*:table/${self:custom.stage.${self:provider.stage}.reportTable}/index/*
+            - arn:aws:dynamodb:${self:custom.stage.${self:provider.stage}.region}:*:table/${self:custom.stage.${self:provider.stage}.productTable}
+            - arn:aws:dynamodb:${self:custom.stage.${self:provider.stage}.region}:*:table/${self:custom.stage.${self:provider.stage}.productTable}/index/*
             - arn:aws:dynamodb:${self:custom.stage.${self:provider.stage}.codegenRegion}:*:table/${self:custom.stage.${self:provider.stage}.codegenTable}
         - Effect: Allow
           Action:
@@ -64,6 +67,7 @@ custom:
       region: us-east-2
       profileTable: beta_user_profile
       paymentTable: beta_payment
+      productTable: beta_institute_product
       reportTable: beta_monthly_report
       codegenTable: beta_code_generator_variables
       codegenRegion: us-east-2
@@ -78,6 +82,7 @@ custom:
       region: us-east-1
       profileTable: user_profile
       paymentTable: payment
+      productTable: institute_product
       reportTable: monthly_report
       codegenTable: code_generator_variables
       codegenRegion: us-east-1

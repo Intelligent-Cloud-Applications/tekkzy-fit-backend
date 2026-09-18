@@ -19,6 +19,12 @@ function publicMethod(item) {
   return 'RAZORPAY';
 }
 
+function publicPayUrl(url) {
+  const value = String(url || '').trim();
+  if (/^https?:\/\//i.test(value) && !/api\.razorpay\.com/i.test(value)) return value;
+  return '';
+}
+
 function publicPaymentId(item) {
   if (isCashItem(item)) {
     const stored = String(item.paymentId || item.paymentCode || '');
@@ -81,6 +87,37 @@ function addPlanDuration(start, days) {
   return months != null ? addCalendarMonths(start, months) : addCalendarDays(start, days);
 }
 
+function prepaidCharge({ amount, addonAmount, startDate, durationDays }) {
+  const membershipStart = String(startDate || today()).slice(0, 10);
+  const admission = Math.max(0, Number(addonAmount || 0) || 0);
+  const plan = Math.max(0, Number(amount || 0) || 0);
+  const days = Number(durationDays || 30);
+  const cycleEnd = addPlanDuration(membershipStart || today(), days);
+  const futureStart = /^\d{4}-\d{2}-\d{2}$/.test(membershipStart) && membershipStart > today();
+  if (!futureStart) {
+    return {
+      futureStart: false,
+      membershipStart,
+      cycleEnd,
+      razorpayStartDate: membershipStart,
+      addonAmount: admission,
+      addonName: admission > 0 ? 'Admission fee' : undefined,
+      addonDescription: admission > 0 ? 'One-time admission / joining fee' : undefined,
+    };
+  }
+  return {
+    futureStart: true,
+    membershipStart,
+    cycleEnd,
+    razorpayStartDate: cycleEnd,
+    addonAmount: admission + plan,
+    addonName: admission > 0 ? 'First cycle + admission' : 'First cycle',
+    addonDescription: admission > 0
+      ? `Plan ₹${plan} + admission ₹${admission} charged today`
+      : `Plan ₹${plan} charged today`,
+  };
+}
+
 function addDays(days) {
   return addPlanDuration(today(), days);
 }
@@ -112,6 +149,14 @@ function diffDays(a, b) {
   );
 }
 
+function dueAfterPause({ pausedAt, oldDue, resumedAt }) {
+  const from = String(pausedAt || resumedAt || today()).slice(0, 10);
+  const due = String(oldDue || '').slice(0, 10);
+  const now = String(resumedAt || today()).slice(0, 10);
+  const remaining = due ? Math.max(0, diffDays(due, from)) : 0;
+  return remaining > 0 ? addCalendarDays(now, remaining) : now;
+}
+
 function repairCycleEnd(start, stored, days) {
   const duration = Number(days || 30);
   if (!start) return stored || '';
@@ -127,15 +172,18 @@ function toMember(item) {
   const lastName = item.lastName || String(item.userName || '').split(' ').slice(1).join(' ');
   const name = item.name || `${firstName} ${lastName}`.trim() || item.userName || 'Member';
   const paid = String(item.paymentStatus || '').toUpperCase() === 'PAID';
-  const fromRazorpay = item.renewDateSource === 'razorpay' || Boolean(item.razorpaySubscriptionId && paid);
+  const held = item.renewDateSource === 'extended' || item.renewDateSource === 'manual';
+  const fromRazorpay = item.renewDateSource === 'razorpay'
+    || (Boolean(item.razorpaySubscriptionId && paid) && !held);
   const cash = ['CASH', 'UPI'].includes(String(item.paymentMethod || '').toUpperCase())
-    || item.renewDateSource === 'manual'
+    || held
     || String(item.subscriptionStatus || '').toUpperCase() === 'OFFLINE';
   const storedRenew = item.renewDate || item.rePaymentDate || '';
   const renewDate = fromRazorpay || cash
     ? storedRenew
     : repairCycleEnd(item.joinDate, storedRenew, item.durationDays);
-  const expired = renewDate && renewDate < today();
+  const suspended = String(item.status || '').toUpperCase() === 'SUSPENDED';
+  const expired = !suspended && renewDate && renewDate < today();
   return {
     id: item.memberId || item.cognitoId,
     memberCode: item.memberCode || `MEM-${String(item.cognitoId || '').slice(-6).toUpperCase()}`,
@@ -164,7 +212,7 @@ function toMember(item) {
     updatedAt: item.updatedAtIso || (item.updatedAt ? new Date(item.updatedAt).toISOString() : new Date().toISOString()),
     paymentStatus: paid ? 'PAID' : item.paymentStatus || 'PENDING',
     renewDate: renewDate || null,
-    renewDateSource: fromRazorpay ? 'razorpay' : item.renewDateSource || null,
+    renewDateSource: held ? item.renewDateSource : (fromRazorpay ? 'razorpay' : item.renewDateSource || null),
     subscriptionId: item.razorpaySubscriptionId || '',
     paymentMethod: item.paymentMethod || '',
     subscriptionStatus: ['CASH', 'UPI'].includes(String(item.paymentMethod || '').toUpperCase())
@@ -177,7 +225,7 @@ function toMember(item) {
     attendance: item.attendance && typeof item.attendance === 'object' ? item.attendance : {},
     attendanceDays: item.attendanceDays && typeof item.attendanceDays === 'object' ? item.attendanceDays : {},
     amount: item.amount ?? null,
-    paymentLinkUrl: paid ? '' : item.paymentLinkUrl || '',
+    paymentLinkUrl: paid ? '' : publicPayUrl(item.paymentLinkUrl),
     cognitoId: item.cognitoId,
     membership: renewDate
       ? {
@@ -223,8 +271,8 @@ function toPayment(item) {
     method: publicMethod(item),
     status: status === 'PAID' || status === 'CAPTURED' ? 'PAID' : status === 'FAILED' ? 'FAILED' : 'PENDING',
     invoiceNumber: item.invoiceNumber || '',
-    notes: item.notes || item.paymentLinkUrl || '',
-    paymentLinkUrl: item.paymentLinkUrl || '',
+    notes: item.notes || publicPayUrl(item.paymentLinkUrl) || '',
+    paymentLinkUrl: publicPayUrl(item.paymentLinkUrl),
     paymentLinkId: item.razorpayPaymentLinkId || item.razorpaySubscriptionId || '',
     subscriptionId: item.razorpaySubscriptionId || '',
     razorpayPaymentId: item.razorpayPaymentId || '',
@@ -254,11 +302,11 @@ function profileFromBody(body, existing, institution = fallbackInstitution()) {
     emailId: (body.email || existing?.emailId || '').trim() || `noreply.${cognitoId}@tekkzy.fit`,
     phoneNumber: body.phone || existing?.phoneNumber || '',
     gender: body.gender || existing?.gender || 'Male',
-    dateOfBirth: body.dateOfBirth || existing?.dateOfBirth || '',
-    address: body.address || existing?.address || '',
-    city: body.city || existing?.city || '',
-    emergencyContactName: body.emergencyContactName || existing?.emergencyContactName || '',
-    emergencyContactPhone: body.emergencyContactPhone || existing?.emergencyContactPhone || '',
+    dateOfBirth: body.dateOfBirth && body.dateOfBirth !== '1995-01-15'
+      ? body.dateOfBirth
+      : existing?.dateOfBirth && existing.dateOfBirth !== '1995-01-15'
+        ? existing.dateOfBirth
+        : undefined,
     deviceEnrollId: body.deviceEnrollId || existing?.deviceEnrollId || '',
     devicePhotoUrl: body.devicePhotoUrl || existing?.devicePhotoUrl || '',
     deviceFingerprint: body.deviceFingerprint || existing?.deviceFingerprint || '',
@@ -268,12 +316,9 @@ function profileFromBody(body, existing, institution = fallbackInstitution()) {
     deviceEndPending: body.deviceEndPending != null ? Boolean(body.deviceEndPending) : Boolean(existing?.deviceEndPending),
     renewDate: body.renewDate || body.deviceEnd || existing?.renewDate || '',
     renewDateSource: body.renewDateSource || existing?.renewDateSource || '',
-    notes: body.notes || existing?.notes || '',
+    notes: body.notes || existing?.notes || undefined,
     status: body.status || existing?.status || 'ACTIVE',
     userType: 'member',
-    role: 'member',
-    source: institution,
-    app: institution,
     planId: body.planId || existing?.planId || '',
     planName: body.planName || existing?.planName || '',
     amount: body.amount != null ? Number(body.amount) : existing?.amount,
@@ -298,10 +343,12 @@ function attendanceMonthKey(day) {
 function applyAttendanceDays(profile, days) {
   const nextDays = { ...(profile.attendanceDays && typeof profile.attendanceDays === 'object' ? profile.attendanceDays : {}) };
   const attendance = { ...(profile.attendance && typeof profile.attendance === 'object' ? profile.attendance : {}) };
+  const start = String(profile.joinDate || profile.deviceStart || '').slice(0, 10);
   let changed = false;
   for (const value of days || []) {
     const ymd = String(value || '').slice(0, 10);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd) || nextDays[ymd]) continue;
+    if (start && ymd < start) continue;
     nextDays[ymd] = true;
     const key = attendanceMonthKey(ymd);
     attendance[key] = Number(attendance[key] || 0) + 1;
@@ -340,8 +387,8 @@ function paymentItem({ profile, planId, planName, amount, durationDays, link, pa
     status: 'PENDING',
     active: true,
     isVerified: false,
-    razorpayPaymentLinkId: link.paymentLinkId,
-    razorpaySubscriptionId: link.subscriptionId || link.paymentLinkId,
+    razorpayPaymentLinkId: String(link.paymentLinkId || '').startsWith('plink_') ? link.paymentLinkId : undefined,
+    razorpaySubscriptionId: link.subscriptionId || '',
     razorpayPlanId: link.razorpayPlanId || '',
     razorpayCustomerId: link.razorpayCustomerId || '',
     paymentLinkUrl: link.paymentLinkUrl,
@@ -365,6 +412,10 @@ module.exports = {
   addDays,
   addDaysFrom,
   addPlanDuration,
+  prepaidCharge,
+  addCalendarDays,
+  diffDays,
+  dueAfterPause,
   repairCycleEnd,
   today,
   toMember,

@@ -15,6 +15,7 @@ const client = DynamoDBDocumentClient.from(new DynamoDBClient({ region: process.
 const PROFILE = process.env.PROFILE_TABLE_NAME || 'beta_user_profile';
 const PAYMENT = process.env.PAYMENT_TABLE_NAME || 'beta_payment';
 const REPORT = process.env.REPORT_TABLE_NAME || 'beta_monthly_report';
+const PRODUCT = process.env.PRODUCT_TABLE_NAME || 'beta_institute_product';
 const CODEGEN = process.env.CODEGEN_TABLE_NAME || 'code_generator_variables';
 const codegenClient = DynamoDBDocumentClient.from(
   new DynamoDBClient({ region: process.env.CODEGEN_TABLE_REGION || 'us-east-1' }),
@@ -25,9 +26,34 @@ function fallbackInstitution() {
   return process.env.INSTITUTION || 'Fitnessworld001';
 }
 
+const MEMBER_DROP = [
+  'address',
+  'city',
+  'emergencyContactName',
+  'emergencyContactPhone',
+  'app',
+  'source',
+  'role',
+];
+
+function compactMember(item) {
+  if (!item || String(item.cognitoId || '').startsWith('__')) return item;
+  if (item.userType && item.userType !== 'member') return item;
+  const next = { ...item };
+  for (const key of MEMBER_DROP) delete next[key];
+  const linkId = String(next.paymentLinkId || '');
+  if (!linkId || linkId.startsWith('sub_')) delete next.paymentLinkId;
+  if (next.dateOfBirth === '1995-01-15') delete next.dateOfBirth;
+  for (const [key, value] of Object.entries(next)) {
+    if (value === '' || value == null) delete next[key];
+  }
+  return next;
+}
+
 async function putProfile(item) {
-  await client.send(new PutCommand({ TableName: PROFILE, Item: item }));
-  return item;
+  const row = compactMember(item);
+  await client.send(new PutCommand({ TableName: PROFILE, Item: row }));
+  return row;
 }
 
 async function getProfile(cognitoId, institution = fallbackInstitution()) {
@@ -61,8 +87,16 @@ async function listProfiles(institution = fallbackInstitution()) {
   return items.filter((row) => {
     const id = String(row.cognitoId || '');
     if (id.startsWith('__')) return false;
-    return !row.userType || row.userType === 'member' || row.source === institution;
+    if (isStaffProfile(row)) return false;
+    return row.userType === 'member' || !row.userType;
   });
+}
+
+function isStaffProfile(row) {
+  const email = String(row.emailId || row.email || '').trim().toLowerCase();
+  if (email === 'admin@tekkzy.com' || email === 'manager@tekkzy.com') return true;
+  const type = String(row.userType || row.role || '').trim().toLowerCase();
+  return type === 'admin' || type === 'manager' || type === 'staff' || type === 'super_admin';
 }
 
 async function putPayment(item) {
@@ -186,28 +220,60 @@ async function listDeviceCmds(institution) {
   return queryPrefix(institution, CMD_PREFIX);
 }
 
+async function pruneStaleDeviceRows(institution, maxAgeMs = 120_000) {
+  const rows = [
+    ...(await queryPrefix(institution, CMD_PREFIX)),
+    ...(await queryPrefix(institution, RES_PREFIX)),
+  ];
+  const now = Date.now();
+  await Promise.all(rows.map(async (row) => {
+    const ts = new Date(row.createdAt || 0).getTime();
+    if (!ts || now - ts > maxAgeMs) {
+      await deleteProfile(row.cognitoId, institution);
+    }
+  }));
+}
+
 async function getDeviceResult(institution, id) {
   return getProfile(`${RES_PREFIX}${id}`, institution);
 }
 
-function planKey(id) {
-  return `${PLAN_PREFIX}${String(id || '').trim()}`;
-}
-
 async function listPlans(institution) {
-  return queryPrefix(institution, PLAN_PREFIX);
+  const items = [];
+  let ExclusiveStartKey;
+  do {
+    const out = await client.send(
+      new QueryCommand({
+        TableName: PRODUCT,
+        KeyConditionExpression: 'institution = :institution',
+        ExpressionAttributeValues: { ':institution': institution },
+        ExclusiveStartKey,
+      }),
+    );
+    items.push(...(out.Items || []));
+    ExclusiveStartKey = out.LastEvaluatedKey;
+  } while (ExclusiveStartKey);
+  return items;
 }
 
 async function getPlan(institution, id) {
-  return getProfile(planKey(id), institution);
+  const productId = String(id || '').trim();
+  if (!productId) return null;
+  const out = await client.send(
+    new GetCommand({ TableName: PRODUCT, Key: { institution, productId } }),
+  );
+  return out.Item || null;
 }
 
 async function putPlan(item) {
-  return putProfile(item);
+  await client.send(new PutCommand({ TableName: PRODUCT, Item: item }));
+  return item;
 }
 
 async function deletePlan(institution, id) {
-  return deleteProfile(planKey(id), institution);
+  const productId = String(id || '').trim();
+  if (!productId) return;
+  await client.send(new DeleteCommand({ TableName: PRODUCT, Key: { institution, productId } }));
 }
 
 async function listReports(institution) {
@@ -272,6 +338,7 @@ module.exports = {
   putBridge,
   getBridge,
   listDeviceCmds,
+  pruneStaleDeviceRows,
   getDeviceResult,
   listPlans,
   getPlan,

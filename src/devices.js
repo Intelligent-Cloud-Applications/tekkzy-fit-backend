@@ -56,6 +56,7 @@ function reply(statusCode, payload) {
 }
 
 async function saveHeartbeat(institution, body) {
+  await dynamo.pruneStaleDeviceRows(institution).catch(() => undefined);
   await dynamo.putBridge(institution, {
     host: body.host || '',
     username: body.username || '',
